@@ -1,0 +1,14 @@
+# Netlify: New → Import from Git → set Base directory to `horizon-admin-app`.
+# API URL is set for production builds below; override in Netlify UI if your API host changes.
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+  VITE_API_BASE_URL = "https://horizon-backend-4e0i.onrender.com"
+
+[[redirects]]  from = "/*"
+  to = "/index.html"
+  status = 200

@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
-  BadgeCheck,
+  Banknote,
   CheckCircle2,
   ChevronRight,
   Download,
@@ -11,6 +11,8 @@ import {
   LayoutDashboard,
   LogOut,
   MapPinned,
+  Package,
+  Plus,
   Search,
   Shield,
   Trash2,
@@ -20,104 +22,25 @@ import {
   XCircle,
 } from 'lucide-react';
 
-const sampleClaims = [
-  {
-    id: 1,
-    status: 'Pending Review',
-    priority: 'High',
-    plateNumber: 'NSW-482QH',
-    driverName: 'Liam Parker',
-    dateOfIncident: '2026-04-18',
-    submittedAt: '2026-04-19',
-    summary: 'Rear-end collision at Marrickville roundabout during wet conditions.',
-    caseFiles: [],
-    quoteOptions: [
-      { id: 'q1', supplier: 'Northside Panels', amount: 4850, reference: 'NSP-2026-041' },
-      { id: 'q2', supplier: 'Eastern Smash Repairs', amount: 5120, reference: 'ESS-8841' },
-    ],
-    primaryQuoteId: null,
-    finalQuoteId: null,
-    data: {
-      memberVehicle: { ownerName: 'Ava Parker', plateNumber: 'NSW-482QH', make: 'Toyota', model: 'Camry' },
-      incident: { suburb: 'Marrickville', roadSurface: 'Wet', description: 'Rear-end collision at roundabout.' },
-      otherParties: [{ plateNumber: 'NSW-551JJ', driverName: 'Mark Dalton' }],
-    },
-  },
-  {
-    id: 2,
-    status: 'Approved',
-    priority: 'Normal',
-    plateNumber: 'NSW-170BK',
-    driverName: 'Chloe Bennett',
-    dateOfIncident: '2026-04-15',
-    submittedAt: '2026-04-16',
-    summary: 'Side impact while merging near airport access road.',
-    caseFiles: [],
-    quoteOptions: [
-      { id: 'q1', supplier: 'Airport Collision Centre', amount: 3920, reference: 'ACC-7721' },
-      { id: 'q2', supplier: 'Mascot Auto Refinish', amount: 4100, reference: 'MAR-1192' },
-    ],
-    primaryQuoteId: 'q1',
-    finalQuoteId: 'q1',
-    data: {
-      memberVehicle: { ownerName: 'Chloe Bennett', plateNumber: 'NSW-170BK', make: 'Mazda', model: 'CX-5' },
-      incident: { suburb: 'Mascot', roadSurface: 'Dry', description: 'Collision while merging.' },
-      otherParties: [{ plateNumber: 'NSW-992PL', driverName: 'Sonia Blair' }],
-    },
-  },
-  {
-    id: 3,
-    status: 'Rejected',
-    priority: 'Needs Docs',
-    plateNumber: 'NSW-935TR',
-    driverName: 'Noah Carter',
-    dateOfIncident: '2026-04-11',
-    submittedAt: '2026-04-12',
-    summary: 'Incomplete supporting documents and inconsistent incident notes.',
-    caseFiles: [],
-    quoteOptions: [
-      { id: 'q1', supplier: 'Tempe Workshop Co.', amount: 2280, reference: 'TWC-3301' },
-      { id: 'q2', supplier: 'Inner West Smash', amount: 2650, reference: 'IWS-902' },
-    ],
-    primaryQuoteId: 'q2',
-    finalQuoteId: null,
-    data: {
-      memberVehicle: { ownerName: 'Noah Carter', plateNumber: 'NSW-935TR', make: 'Hyundai', model: 'i30' },
-      incident: { suburb: 'Tempe', roadSurface: 'Loose', description: 'Claim could not be validated.' },
-      otherParties: [],
-    },
-  },
-];
+import * as api from './api.js';
+import { MemberSubmissionPanel } from './MemberSubmissionPanel.jsx';
 
-const CLAIMS_OVERRIDES_KEY = 'horizon_admin_claims_overrides_v1';
-
-function readClaimsOverrides() {
-  try {
-    const raw = localStorage.getItem(CLAIMS_OVERRIDES_KEY);
-    if (!raw) return null;
-    const data = JSON.parse(raw);
-    return data && typeof data === 'object' ? data : null;
-  } catch {
-    return null;
-  }
+/** Payment status is only `pending` or `completed`; maps legacy stored values. */
+function normalizePaymentStatus(raw) {
+  const s = String(raw ?? '').trim();
+  if (s === 'completed') return 'completed';
+  if (s === 'payment' || s === 'received' || s === 'approved') return 'completed';
+  return 'pending';
 }
 
-function mergeClaimsWithOverrides(sample, overrides) {
-  if (!overrides) return sample.map((c) => ({ ...c, data: { ...c.data } }));
-  return sample.map((claim) => {
-    const ov = overrides[String(claim.id)] ?? overrides[claim.id];
-    if (!ov || typeof ov !== 'object') return { ...claim, data: { ...claim.data } };
-    return {
-      ...claim,
-      status: ov.status ?? claim.status,
-      caseFiles: Array.isArray(ov.caseFiles) ? ov.caseFiles : (claim.caseFiles ?? []),
-      primaryQuoteId: ov.primaryQuoteId !== undefined ? ov.primaryQuoteId : claim.primaryQuoteId,
-      finalQuoteId: ov.finalQuoteId !== undefined ? ov.finalQuoteId : claim.finalQuoteId,
-      quoteOptions:
-        Array.isArray(ov.quoteOptions) && ov.quoteOptions.length ? ov.quoteOptions : claim.quoteOptions,
-      data: { ...(claim.data ?? {}), ...(ov.data ?? {}) },
-    };
-  });
+/** Open PDF / file links from `/uploads/...` on the API origin. */
+function resolveClaimFileHref(urlOrDataUrl) {
+  const u = String(urlOrDataUrl || '');
+  if (!u || u.startsWith('data:') || u.startsWith('blob:')) return u || '#';
+  if (u.startsWith('http://') || u.startsWith('https://')) return u;
+  const base = api.apiBase();
+  if (!base) return '#';
+  return `${base}${u.startsWith('/') ? u : `/${u}`}`;
 }
 
 const detailFields = [
@@ -145,20 +68,53 @@ const queueHighlights = [
 
 const STATUS_OPTIONS = ['All', 'Pending Review', 'Approved', 'Rejected'];
 
+const PAYMENT_STATUS_OPTIONS = [
+  { id: 'pending', label: 'Pending' },
+  { id: 'completed', label: 'Completed' },
+];
+
+const PART_STATUS_OPTIONS = [
+  { id: 'pending', label: 'Pending' },
+  { id: 'completed', label: 'Completed' },
+];
+
 const MODAL_TABS = [
   { id: 'overview', label: 'Overview' },
+  { id: 'submission', label: 'Member submission' },
   { id: 'records', label: 'Vehicle & incident' },
   { id: 'parties', label: 'Parties & witnesses' },
-  { id: 'quotes', label: 'Quotes & PDFs' },
+  { id: 'quotes', label: 'Insurance quote' },
+  { id: 'payments', label: 'Supplier' },
 ];
+
+function newQuoteLine() {
+  const id =
+    typeof crypto !== 'undefined' && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `quote-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return { id, supplier: '', amount: 0, reference: '', notes: '' };
+}
+
+function parseMoneyInput(raw) {
+  if (raw === '' || raw === null || raw === undefined) return null;
+  const n = Number(String(raw).replace(/,/g, ''));
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function moneyAmountsEqual(stored, draftRaw) {
+  const draft = parseMoneyInput(draftRaw);
+  if (stored == null && draft == null) return true;
+  if (stored == null || draft == null) return false;
+  return Number(stored) === Number(draft);
+}
+
+/** Save vs update label for fields already stored on the server. */
+function saveUpdateLabel({ hasSaved, busy, entity }) {
+  if (busy) return hasSaved ? `Updating ${entity}…` : `Saving ${entity}…`;
+  return hasSaved ? `Update ${entity}` : `Save ${entity}`;
+}
 
 const AUTH_STORAGE_KEY = 'horizon_admin_session';
-
-/** Demo accounts — replace with real API auth. Passwords are for local UI only. */
-const DEMO_ACCOUNTS = [
-  { email: 'admin@horizon.smash', password: 'admin123', role: 'admin', displayName: 'Alex Rivera' },
-  { email: 'moderator@horizon.smash', password: 'mod123', role: 'moderator', displayName: 'Jordan Lee' },
-];
 
 const ROLE_OPTIONS = [
   { id: 'admin', label: 'Administrator', icon: Shield },
@@ -170,8 +126,13 @@ function readStoredSession() {
     const raw = sessionStorage.getItem(AUTH_STORAGE_KEY);
     if (!raw) return null;
     const data = JSON.parse(raw);
-    if (!data?.email || (data.role !== 'admin' && data.role !== 'moderator')) return null;
-    return { email: data.email, displayName: data.displayName || data.email, role: data.role };
+    if (!data?.email || !data?.token || (data.role !== 'admin' && data.role !== 'moderator')) return null;
+    return {
+      email: data.email,
+      displayName: data.displayName || data.email,
+      role: data.role,
+      token: data.token,
+    };
   } catch {
     return null;
   }
@@ -186,8 +147,26 @@ function initialsFromName(name) {
   return '??';
 }
 
-function claimRef(id) {
-  return `HRZ-${String(id).padStart(5, '0')}`;
+function claimMongoId(item) {
+  return api.normalizeClaimId(item?.id) || api.normalizeClaimId(item?._id);
+}
+
+function claimRef(item) {
+  const intake = typeof item?.intakeReference === 'string' ? item.intakeReference.trim() : '';
+  if (intake) return intake;
+  const ref = typeof item?.reference === 'string' ? item.reference.trim() : '';
+  if (ref) return ref;
+  const id = api.normalizeClaimId(item?.id ?? item?._id);
+  if (id) return id.length > 12 ? `${id.slice(0, 12)}…` : id;
+  return 'Claim';
+}
+
+/** Both refs for print / PDF export (member code + internal). */
+function claimExportRefSummary(item) {
+  const lines = [];
+  if (item?.intakeReference) lines.push(`Member reference: ${item.intakeReference}`);
+  if (item?.reference) lines.push(`System reference: ${item.reference}`);
+  return lines.length ? lines.join(' · ') : claimRef(item);
 }
 
 function shareOfTotal(part, total) {
@@ -235,23 +214,103 @@ function formatAud(amount) {
   );
 }
 
+function newPartLine() {
+  const id =
+    typeof crypto !== 'undefined' && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `part-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return { id, company: '', amount: 0, status: 'pending', notes: '' };
+}
+
+function cloneParts(parts) {
+  return (parts ?? []).map((p) => ({ ...p }));
+}
+
+function cloneQuoteOptions(options) {
+  return (options ?? []).map((q) => ({ ...q }));
+}
+
+function partsSnapshot(parts) {
+  return cloneParts(parts)
+    .map((p) => ({
+      id: String(p.id || ''),
+      company: String(p.company ?? ''),
+      amount: Number(p.amount) || 0,
+      status: String(p.status || 'pending').toLowerCase() === 'completed' ? 'completed' : 'pending',
+      notes: String(p.notes ?? ''),
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function partsEqual(a, b) {
+  return JSON.stringify(partsSnapshot(a)) === JSON.stringify(partsSnapshot(b));
+}
+
+function quoteOptionsSnapshot(options) {
+  return cloneQuoteOptions(options)
+    .map((q) => ({
+      id: String(q.id || ''),
+      supplier: String(q.supplier ?? ''),
+      amount: Number(q.amount) || 0,
+      reference: String(q.reference ?? ''),
+      notes: String(q.notes ?? ''),
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function quoteOptionsEqual(a, b) {
+  return JSON.stringify(quoteOptionsSnapshot(a)) === JSON.stringify(quoteOptionsSnapshot(b));
+}
+
+function paymentStatusLabel(raw) {
+  const id = normalizePaymentStatus(raw);
+  return PAYMENT_STATUS_OPTIONS.find((o) => o.id === id)?.label ?? 'Pending';
+}
+
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 function LoginScreen({ onLoggedIn }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
     const normalized = email.trim().toLowerCase();
-    const account = DEMO_ACCOUNTS.find((a) => a.email === normalized && a.password === password);
-    if (!account) {
-      setError('Email or password is not valid for this workspace.');
+    if (!normalized || !password) {
+      setError('Enter email and password.');
       return;
     }
-    const session = { email: account.email, displayName: account.displayName, role: account.role };
-    sessionStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(session));
-    onLoggedIn(session);
+    if (!api.apiBase()) {
+      setError(
+        'API URL is not configured for this build. In Netlify: Site configuration → Environment variables → add VITE_API_BASE_URL (your public HTTPS API, no trailing slash), then redeploy.',
+      );
+      return;
+    }
+    setBusy(true);
+    try {
+      const out = await api.loginAdmin(normalized, password);
+      const session = {
+        email: out.user.email,
+        displayName: out.user.displayName,
+        role: out.user.role,
+        token: out.token,
+      };
+      sessionStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(session));
+      onLoggedIn(session);
+    } catch (err) {
+      setError(err.message || 'Email or password is not valid for this workspace.');
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -311,19 +370,30 @@ function LoginScreen({ onLoggedIn }) {
             )}
             <button
               type="submit"
-              className="group relative h-11 w-full overflow-hidden rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-sm font-semibold text-white shadow-lg shadow-indigo-950/40 transition hover:from-indigo-400 hover:to-violet-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900"
+              disabled={busy}
+              className="group relative h-11 w-full overflow-hidden rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-sm font-semibold text-white shadow-lg shadow-indigo-950/40 transition hover:from-indigo-400 hover:to-violet-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              <span className="relative z-10">Continue to workspace</span>
+              <span className="relative z-10">{busy ? 'Signing in…' : 'Continue to workspace'}</span>
               <span className="absolute inset-0 bg-gradient-to-t from-black/10 to-transparent opacity-0 transition group-hover:opacity-100" aria-hidden />
             </button>
           </form>
           <div className="mt-8 rounded-xl border border-white/5 bg-zinc-950/50 px-4 py-3">
             <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Demo access</p>
-            <p className="mt-2 font-mono text-2xs leading-relaxed text-zinc-500">
-              <span className="text-zinc-400">Admin</span> admin@horizon.smash · admin123
-              <br />
-              <span className="text-zinc-400">Moderator</span> moderator@horizon.smash · mod123
-            </p>
+            {api.apiBase() ? (
+              <p className="mt-2 font-mono text-2xs leading-relaxed text-zinc-500">
+                Backend auth on <span className="text-zinc-400">{api.apiBase()}</span>. Run{' '}
+                <span className="text-zinc-400">npm run seed:staff</span> once, then{' '}
+                <span className="text-zinc-400">admin@horizon.smash</span> · <span className="text-zinc-400">admin123</span>
+                <br />
+                Moderator: <span className="text-zinc-400">moderator@horizon.smash</span> ·{' '}
+                <span className="text-zinc-400">mod123</span>
+              </p>
+            ) : (
+              <p className="mt-2 text-2xs leading-relaxed text-amber-200/90">
+                Production build has no API URL. Add <span className="font-mono text-zinc-300">VITE_API_BASE_URL</span> in
+                Netlify environment variables (your deployed API over <span className="font-mono">https://</span>), redeploy, and add this Netlify URL to your API CORS list. Browsers block calling a LAN or HTTP API from this HTTPS page.
+              </p>
+            )}
           </div>
         </div>
       </div>
@@ -333,37 +403,244 @@ function LoginScreen({ onLoggedIn }) {
 
 function App() {
   const [session, setSession] = useState(readStoredSession);
-  const [claims, setClaims] = useState(() => mergeClaimsWithOverrides(sampleClaims, readClaimsOverrides()));
+  const [claims, setClaims] = useState([]);
+  const [claimsLoading, setClaimsLoading] = useState(false);
+  const [claimsError, setClaimsError] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedClaim, setSelectedClaim] = useState(null);
   const [statusFilter, setStatusFilter] = useState('All');
+  const [workspaceSave, setWorkspaceSave] = useState('idle');
+
+  const persistTimersRef = useRef({});
+  const persistWorkspaceBodiesRef = useRef({});
+  const workspacePersistSeqRef = useRef(0);
+
+  const logout = useCallback(() => {
+    sessionStorage.removeItem(AUTH_STORAGE_KEY);
+    Object.values(persistTimersRef.current || {}).forEach((t) => window.clearTimeout(t));
+    persistTimersRef.current = {};
+    persistWorkspaceBodiesRef.current = {};
+    setSession(null);
+    setSelectedClaim(null);
+    setClaims([]);
+    setClaimsError('');
+  }, []);
+
+  const loadClaims = useCallback(
+    async (token, { status = statusFilter, q = searchTerm } = {}) => {
+      const rows = await api.listClaims(token, {
+        status,
+        q: String(q || '').trim() || undefined,
+      });
+      return rows.map(api.claimFromApi);
+    },
+    [statusFilter, searchTerm]
+  );
+
+  const applyClaimFromServer = useCallback((serverClaim) => {
+    const norm = api.claimFromApi(serverClaim);
+    const cid = claimMongoId(norm);
+    if (!cid) return norm;
+    setClaims((curr) => curr.map((c) => (claimMongoId(c) === cid ? norm : c)));
+    setSelectedClaim((cur) => (cur && claimMongoId(cur) === cid ? norm : cur));
+    return norm;
+  }, []);
+
+  const runWorkspacePersist = useCallback(
+    async (id, body, seq) => {
+      if (!session?.token || session.role !== 'admin' || !body) return;
+      const claimId = api.normalizeClaimId(id);
+      if (!claimId) throw new Error('Invalid claim id');
+      const updated = await api.patchClaimWorkspace(session.token, claimId, body);
+      if (seq != null && seq !== workspacePersistSeqRef.current) return updated;
+      applyClaimFromServer(updated);
+      setWorkspaceSave('saved');
+      return updated;
+    },
+    [session, applyClaimFromServer]
+  );
+
+  const scheduleWorkspacePersist = useCallback(
+    (id, mergedClaim) => {
+      if (!session?.token || session.role !== 'admin') return;
+      const claimId = api.normalizeClaimId(id) || claimMongoId(mergedClaim);
+      if (!claimId) {
+        setWorkspaceSave('error');
+        return;
+      }
+      persistWorkspaceBodiesRef.current[claimId] = api.buildAdminPersistBody(mergedClaim);
+      setWorkspaceSave('saving');
+      window.clearTimeout(persistTimersRef.current[claimId]);
+      const seq = ++workspacePersistSeqRef.current;
+      persistTimersRef.current[claimId] = window.setTimeout(async () => {
+        const body = persistWorkspaceBodiesRef.current[claimId];
+        if (!body || !session?.token) return;
+        try {
+          await runWorkspacePersist(claimId, body, seq);
+        } catch (e) {
+          console.error(e);
+          setWorkspaceSave('error');
+          if (e instanceof api.ApiAuthError) logout();
+        }
+      }, 420);
+    },
+    [session, logout, runWorkspacePersist]
+  );
+
+  const flushWorkspacePersist = useCallback(
+    async (claim) => {
+      const claimId = claimMongoId(claim);
+      if (!claimId || !session?.token || session.role !== 'admin') return;
+      window.clearTimeout(persistTimersRef.current[claimId]);
+      const body = persistWorkspaceBodiesRef.current[claimId] || api.buildAdminPersistBody(claim);
+      setWorkspaceSave('saving');
+      try {
+        await runWorkspacePersist(claimId, body);
+        delete persistWorkspaceBodiesRef.current[claimId];
+      } catch (e) {
+        console.error(e);
+        setWorkspaceSave('error');
+      }
+    },
+    [session, runWorkspacePersist]
+  );
+
+  const closeClaimModal = useCallback(() => {
+    setSelectedClaim(null);
+  }, []);
+
+  const saveClaimPrices = useCallback(
+    async (fields) => {
+      if (!session?.token || session.role !== 'admin' || !selectedClaim) {
+        throw new Error('Not authorized');
+      }
+      const claimId = claimMongoId(selectedClaim);
+      if (!claimId) throw new Error('Invalid claim id');
+      setWorkspaceSave('saving');
+      try {
+        const updated = await api.persistClaimPrices(session.token, claimId, fields);
+        applyClaimFromServer(updated);
+        const pending = persistWorkspaceBodiesRef.current[claimId];
+        if (pending) {
+          if (Object.prototype.hasOwnProperty.call(fields, 'quotePrice')) {
+            pending.quotePrice = updated.quotePrice ?? null;
+          }
+          if (Object.prototype.hasOwnProperty.call(fields, 'insuranceApprovedPrice')) {
+            pending.insuranceApprovedPrice = updated.insuranceApprovedPrice ?? null;
+          }
+        }
+        setWorkspaceSave('saved');
+        return updated;
+      } catch (e) {
+        setWorkspaceSave('error');
+        if (e instanceof api.ApiAuthError) logout();
+        throw e;
+      }
+    },
+    [session, selectedClaim, applyClaimFromServer, logout]
+  );
+
+  const saveAdminNote = useCallback(
+    async (note) => {
+      if (!session?.token || session.role !== 'admin' || !selectedClaim) {
+        throw new Error('Not authorized');
+      }
+      const claimId = claimMongoId(selectedClaim);
+      if (!claimId) throw new Error('Invalid claim id');
+      const updated = await api.persistAdminNote(session.token, claimId, note);
+      applyClaimFromServer(updated);
+      return updated;
+    },
+    [session, selectedClaim, applyClaimFromServer]
+  );
+
+  const saveParts = useCallback(
+    async (parts) => {
+      if (!session?.token || session.role !== 'admin' || !selectedClaim) {
+        throw new Error('Not authorized');
+      }
+      const claimId = claimMongoId(selectedClaim);
+      if (!claimId) throw new Error('Invalid claim id');
+      const updated = await api.persistParts(session.token, claimId, parts);
+      applyClaimFromServer(updated);
+      return updated;
+    },
+    [session, selectedClaim, applyClaimFromServer]
+  );
+
+  const saveQuoteWorkspace = useCallback(
+    async (payload) => {
+      if (!session?.token || session.role !== 'admin' || !selectedClaim) {
+        throw new Error('Not authorized');
+      }
+      const claimId = claimMongoId(selectedClaim);
+      if (!claimId) throw new Error('Invalid claim id');
+      const updated = await api.persistQuoteWorkspace(session.token, claimId, payload);
+      applyClaimFromServer(updated);
+      return updated;
+    },
+    [session, selectedClaim, applyClaimFromServer]
+  );
+
+  const savePaymentStatus = useCallback(
+    async (paymentStatus) => {
+      if (!session?.token || session.role !== 'admin' || !selectedClaim) {
+        throw new Error('Not authorized');
+      }
+      const claimId = claimMongoId(selectedClaim);
+      if (!claimId) throw new Error('Invalid claim id');
+      const updated = await api.persistPaymentStatus(session.token, claimId, paymentStatus);
+      applyClaimFromServer(updated);
+      return updated;
+    },
+    [session, selectedClaim, applyClaimFromServer]
+  );
+
+  useEffect(() => {
+    if (!session?.token) return undefined;
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      setClaimsLoading(true);
+      setClaimsError('');
+      try {
+        const mapped = await loadClaims(session.token);
+        if (!cancelled) setClaims(mapped);
+      } catch (e) {
+        if (!cancelled) {
+          if (e instanceof api.ApiAuthError) logout();
+          else setClaimsError(e.message || 'Could not load claims.');
+        }
+      } finally {
+        if (!cancelled) setClaimsLoading(false);
+      }
+    }, 280);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [session?.token, statusFilter, searchTerm, loadClaims, logout]);
+
+  useEffect(() => {
+    if (!session?.token) return;
+    const onFocus = () => {
+      loadClaims(session.token)
+        .then(setClaims)
+        .catch((e) => {
+          if (e instanceof api.ApiAuthError) logout();
+        });
+    };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [session?.token, loadClaims, logout]);
 
   useEffect(() => {
     if (!selectedClaim) return;
     const onKey = (e) => {
-      if (e.key === 'Escape') setSelectedClaim(null);
+      if (e.key === 'Escape') closeClaimModal();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedClaim]);
-
-  useEffect(() => {
-    try {
-      const overrides = {};
-      claims.forEach((c) => {
-        overrides[c.id] = {
-          status: c.status,
-          caseFiles: c.caseFiles ?? [],
-          primaryQuoteId: c.primaryQuoteId ?? null,
-          finalQuoteId: c.finalQuoteId ?? null,
-          quoteOptions: c.quoteOptions,
-        };
-      });
-      localStorage.setItem(CLAIMS_OVERRIDES_KEY, JSON.stringify(overrides));
-    } catch (e) {
-      console.warn('Could not persist claims to local storage', e);
-    }
-  }, [claims]);
+  }, [selectedClaim, closeClaimModal]);
 
   const metrics = useMemo(() => {
     const pending = claims.filter((item) => item.status === 'Pending Review').length;
@@ -372,37 +649,53 @@ function App() {
     return { total: claims.length, pending, approved, rejected };
   }, [claims]);
 
-  const filteredClaims = useMemo(() => {
-    const query = searchTerm.trim().toLowerCase();
-    return claims.filter((item) => {
-      const matchesStatus = statusFilter === 'All' ? true : item.status === statusFilter;
-      const matchesQuery = !query
-        ? true
-        : [item.plateNumber, item.driverName, item.dateOfIncident, item.status, item.priority]
-            .filter(Boolean)
-            .some((value) => value.toLowerCase().includes(query));
-      return matchesStatus && matchesQuery;
-    });
-  }, [claims, searchTerm, statusFilter]);
+  const filteredClaims = claims;
 
   if (!session) {
     return <LoginScreen onLoggedIn={setSession} />;
   }
 
-  const updateClaimStatus = (id, status) => {
-    setClaims((current) => current.map((item) => (item.id === id ? { ...item, status } : item)));
-    setSelectedClaim((current) => (current && current.id === id ? { ...current, status } : current));
+  const updateClaimStatus = async (id, status) => {
+    const claimId = claimMongoId({ id, _id: id });
+    if (!claimId) {
+      window.alert('Invalid claim id — refresh the page, then open this claim again from the queue.');
+      return;
+    }
+    const sameClaim = (item) => claimMongoId(item) === claimId;
+    setClaims((current) => current.map((item) => (sameClaim(item) ? { ...item, status } : item)));
+    setSelectedClaim((current) => (current && sameClaim(current) ? { ...current, status } : current));
+    if (!session.token || session.role !== 'admin') return;
+    try {
+      const updated = await api.patchClaimStatus(session.token, claimId, status);
+      applyClaimFromServer(updated);
+    } catch (e) {
+      console.error(e);
+      window.alert(`Could not update status on server: ${e.message || String(e)}`);
+    }
   };
 
   const patchClaim = (id, partialOrFn) => {
-    const applyMerge = (prev) => {
-      if (!prev || prev.id !== id) return prev;
-      return typeof partialOrFn === 'function'
-        ? { ...prev, ...partialOrFn(prev) }
-        : { ...prev, ...partialOrFn };
+    const claimId = api.normalizeClaimId(id);
+    let mergedSnapshot = null;
+    const mergeInto = (item) => {
+      if (!item) return item;
+      const itemClaimId = claimMongoId(item);
+      if (claimId) {
+        if (!itemClaimId || itemClaimId !== claimId) return item;
+      } else if (String(item.id) !== String(id)) {
+        return item;
+      }
+      const merged =
+        typeof partialOrFn === 'function' ? partialOrFn(item) : { ...item, ...partialOrFn };
+      const out = Object.prototype.hasOwnProperty.call(merged, 'paymentStatus')
+        ? { ...merged, paymentStatus: normalizePaymentStatus(merged.paymentStatus) }
+        : merged;
+      const resolvedId = claimMongoId(out) || claimId;
+      mergedSnapshot = resolvedId ? { ...out, id: resolvedId, _id: resolvedId } : out;
+      return mergedSnapshot;
     };
-    setClaims((current) => current.map((item) => applyMerge(item)));
-    setSelectedClaim((current) => applyMerge(current));
+    setClaims((current) => current.map(mergeInto));
+    setSelectedClaim((current) => mergeInto(current));
   };
 
   const exportClaimToPdf = (item) => {
@@ -420,17 +713,30 @@ function App() {
         ? caseFiles.map((f) => `${f.name} (${f.uploadedAt})`).join('<br/>')
         : 'No PDFs attached in this workspace snapshot.';
     const quoteSummary = `
-      <p><strong>Primary quote:</strong> ${
-        primaryQuote
-          ? `${primaryQuote.supplier} — ${primaryQuote.reference} (${formatAud(primaryQuote.amount)})`
-          : 'Not selected'
+      <p><strong>Quote price (repair shop):</strong> ${
+        item.quotePrice != null ? formatAud(item.quotePrice) : 'Not set'
       }</p>
-      <p><strong>Final quote:</strong> ${
-        finalQuote
-          ? `${finalQuote.supplier} — ${finalQuote.reference} (${formatAud(finalQuote.amount)})`
-          : 'Not set'
+      <p><strong>Insurance company price:</strong> ${
+        item.insuranceApprovedPrice != null ? formatAud(item.insuranceApprovedPrice) : 'Not set'
+      }</p>
+      <p><strong>Primary workshop line:</strong> ${
+        primaryQuote ? `${primaryQuote.supplier} (${formatAud(primaryQuote.amount)})` : 'Not selected'
+      }</p>
+      <p><strong>Final workshop line:</strong> ${
+        finalQuote ? `${finalQuote.supplier} (${formatAud(finalQuote.amount)})` : 'Not set'
       }</p>
     `;
+    const paymentLine = paymentStatusLabel(item.paymentStatus);
+    const noteHtml = escapeHtml(item.adminNote || '').replace(/\n/g, '<br/>') || '—';
+    const parts = item.parts ?? [];
+    const partsHtml = parts.length
+      ? `<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr><th align="left" style="padding:6px 0;border-bottom:1px solid #cbd5e1;">Company</th><th align="right" style="padding:6px 0;border-bottom:1px solid #cbd5e1;">Amount</th><th align="left" style="padding:6px 0;border-bottom:1px solid #cbd5e1;">Notes</th><th align="left" style="padding:6px 0;border-bottom:1px solid #cbd5e1;">Status</th></tr></thead><tbody>${parts
+          .map(
+            (p) =>
+              `<tr><td style="padding:6px 0;border-bottom:1px solid #e2e8f0;">${escapeHtml(p.company || '—')}</td><td style="padding:6px 0;border-bottom:1px solid #e2e8f0;text-align:right;">${formatAud(p.amount)}</td><td style="padding:6px 0;border-bottom:1px solid #e2e8f0;">${escapeHtml(p.notes || '—').replace(/\n/g, '<br/>')}</td><td style="padding:6px 0;border-bottom:1px solid #e2e8f0;">${escapeHtml(p.status)}</td></tr>`,
+          )
+          .join('')}</tbody></table>`
+      : '<p>No part lines recorded.</p>';
     const damageMarkerCount = data.damage?.points
       ? Object.values(data.damage.points).reduce((count, list) => count + list.length, 0)
       : 0;
@@ -460,7 +766,7 @@ function App() {
         </head>
         <body>
           <h1>Horizon Smash Repairs Claim Export</h1>
-          <div class="ref">${claimRef(item.id)}</div>
+          <div class="ref">${escapeHtml(claimExportRefSummary(item))}</div>
           <div class="meta">
             <p><strong>Plate:</strong> ${item.plateNumber}</p>
             <p><strong>Driver:</strong> ${item.driverName}</p>
@@ -489,6 +795,24 @@ function App() {
           </div>
           <div class="section">
             <div class="card">
+              <div class="label">Payment status</div>
+              <div class="value">${paymentLine}</div>
+            </div>
+          </div>
+          <div class="section">
+            <div class="card">
+              <div class="label">Admin note</div>
+              <div class="value">${noteHtml}</div>
+            </div>
+          </div>
+          <div class="section">
+            <div class="card">
+              <div class="label">Parts</div>
+              <div class="value">${partsHtml}</div>
+            </div>
+          </div>
+          <div class="section">
+            <div class="card">
               <div class="label">PDF attachments (names)</div>
               <div class="value">${pdfList}</div>
             </div>
@@ -501,17 +825,29 @@ function App() {
     printable.print();
   };
 
-  const openRow = (item) => setSelectedClaim(item);
+  const openRow = async (item) => {
+    if (!session?.token) return;
+    const rowId = api.normalizeClaimId(item?.id ?? item?._id);
+    if (!rowId) {
+      window.alert('This claim has an invalid id in the list. Refresh the page or contact support.');
+      return;
+    }
+    setSelectedClaim({ ...api.claimFromApi({ ...item, id: rowId }), _detailLoading: true });
+    try {
+      const full = await api.getClaim(session.token, rowId);
+      setSelectedClaim(api.claimFromApi(full));
+    } catch (e) {
+      if (e instanceof api.ApiAuthError) logout();
+      else {
+        console.warn(e);
+        setSelectedClaim(item);
+      }
+    }
+  };
   const t = metrics.total;
   const roleMeta = ROLE_OPTIONS.find((r) => r.id === session.role) ?? ROLE_OPTIONS[0];
   const userInitials = initialsFromName(session.displayName);
   const isModerator = session.role === 'moderator';
-
-  const logout = () => {
-    sessionStorage.removeItem(AUTH_STORAGE_KEY);
-    setSession(null);
-    setSelectedClaim(null);
-  };
 
   return (
     <div className="min-h-screen bg-mesh-app font-sans text-zinc-900 antialiased">
@@ -620,6 +956,12 @@ function App() {
 
           <main className="flex-1 overflow-auto scrollbar-thin px-4 py-5 sm:px-5 lg:px-8 lg:py-7">
             <>
+            {claimsError ? (
+              <div className="mb-5 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">{claimsError}</div>
+            ) : null}
+            {claimsLoading ? (
+              <div className="mb-5 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-700">Loading claims from API…</div>
+            ) : null}
             {isModerator && (
               <div className="mb-5 flex items-start gap-3 rounded-xl border border-indigo-200/80 bg-gradient-to-r from-indigo-50/90 to-white px-4 py-3 shadow-card sm:items-center sm:px-5">
                 <span className="mt-0.5 shrink-0 rounded-lg border border-indigo-300/80 bg-white px-2 py-0.5 text-2xs font-bold uppercase tracking-wide text-indigo-900 shadow-sm sm:mt-0">
@@ -715,15 +1057,18 @@ function App() {
                 </div>
 
                 <div className="overflow-x-auto scrollbar-thin">
-                  <table className="min-w-[720px] w-full border-collapse text-left text-[13px]">
+                  <table className="min-w-[800px] w-full border-collapse text-left text-[13px]">
                     <thead>
                       <tr className="border-b border-zinc-200 bg-zinc-50/95">
                         <th className="w-10 px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">#</th>
-                        <th className="px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Reference</th>
+                        <th className="px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500" title="Member portal code (HR-…) and internal id (HRZ-…)">
+                          Reference
+                        </th>
                         <th className="min-w-[140px] px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Plate</th>
                         <th className="min-w-[160px] px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Driver</th>
                         <th className="whitespace-nowrap px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Submitted</th>
                         <th className="whitespace-nowrap px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Incident</th>
+                        <th className="px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Payment</th>
                         <th className="px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Priority</th>
                         <th className="px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Status</th>
                         <th className="w-10 px-3 py-2.5" aria-hidden />
@@ -749,7 +1094,22 @@ function App() {
                             }`}
                           >
                             <td className="px-3 py-2.5 font-mono text-2xs tabular-nums text-zinc-400">{index + 1}</td>
-                            <td className="px-3 py-2.5 font-mono text-2xs text-zinc-500">{claimRef(item.id)}</td>
+                            <td className="px-3 py-2.5 font-mono text-2xs text-zinc-500">
+                              {item.intakeReference ? (
+                                <div className="min-w-0">
+                                  <div className="font-semibold text-zinc-800" title="Code from the public claim portal">
+                                    {item.intakeReference}
+                                  </div>
+                                  {item.reference ? (
+                                    <div className="mt-0.5 truncate text-zinc-400" title="Internal system reference">
+                                      {item.reference}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              ) : (
+                                <span className="text-zinc-600">{claimRef(item)}</span>
+                              )}
+                            </td>
                             <td className="px-3 py-2.5">
                               <div className="flex items-center gap-2">
                                 <span
@@ -777,6 +1137,9 @@ function App() {
                               {item.dateOfIncident}
                             </td>
                             <td className="px-3 py-2.5">
+                              <PaymentStatusBadge status={item.paymentStatus ?? 'pending'} />
+                            </td>
+                            <td className="px-3 py-2.5">
                               <PriorityBadge priority={item.priority} />
                             </td>
                             <td className="px-3 py-2.5">
@@ -790,7 +1153,7 @@ function App() {
                       })}
                       {!filteredClaims.length && (
                         <tr>
-                          <td colSpan={9} className="px-4 py-12">
+                          <td colSpan={10} className="px-4 py-12">
                             <div className="mx-auto max-w-md rounded-xl border border-dashed border-zinc-200 bg-zinc-50/80 px-5 py-8 text-center shadow-inner">
                               <p className="text-sm font-semibold text-zinc-900">No matching claims</p>
                               <p className="mt-1.5 text-sm text-zinc-600">
@@ -890,12 +1253,19 @@ function App() {
         <ClaimModal
           claimItem={selectedClaim}
           role={session.role}
-          onClose={() => setSelectedClaim(null)}
-          onApprove={() => updateClaimStatus(selectedClaim.id, 'Approved')}
-          onRequestInfo={() => updateClaimStatus(selectedClaim.id, 'Pending Review')}
-          onReject={() => updateClaimStatus(selectedClaim.id, 'Rejected')}
+          authToken={session.token}
+          workspaceSave={workspaceSave}
+          onClose={closeClaimModal}
+          onApprove={() => updateClaimStatus(claimMongoId(selectedClaim), 'Approved')}
+          onReject={() => updateClaimStatus(claimMongoId(selectedClaim), 'Rejected')}
+          onReopen={() => updateClaimStatus(claimMongoId(selectedClaim), 'Pending Review')}
           onExport={() => exportClaimToPdf(selectedClaim)}
           onPatchClaim={patchClaim}
+          onUpdatePrices={saveClaimPrices}
+          onSaveAdminNote={saveAdminNote}
+          onSaveParts={saveParts}
+          onSaveQuoteWorkspace={saveQuoteWorkspace}
+          onSavePaymentStatus={savePaymentStatus}
         />
       )}
     </div>
@@ -958,6 +1328,38 @@ function PriorityBadge({ priority }) {
   );
 }
 
+function PaymentStatusBadge({ status }) {
+  const id = normalizePaymentStatus(status);
+  const styles =
+    id === 'completed'
+      ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+      : 'border-amber-200 bg-amber-50 text-amber-950';
+
+  return (
+    <span
+      className={`inline-flex rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide ${styles}`}
+    >
+      {paymentStatusLabel(id)}
+    </span>
+  );
+}
+
+function PartStatusBadge({ status }) {
+  const id = status === 'completed' ? 'completed' : 'pending';
+  const styles =
+    id === 'completed'
+      ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+      : 'border-amber-200 bg-amber-50 text-amber-950';
+
+  return (
+    <span
+      className={`inline-flex rounded border px-1.5 py-0.5 text-2xs font-semibold capitalize ${styles}`}
+    >
+      {id}
+    </span>
+  );
+}
+
 function QueueStat({ label, value }) {
   return (
     <div className="flex items-baseline justify-between gap-2 rounded-xl border border-zinc-100 bg-zinc-50/90 px-3 py-2 shadow-inner">
@@ -1017,21 +1419,154 @@ function OperationalPill({ title, text }) {
   );
 }
 
-function ClaimModal({ claimItem, role, onClose, onApprove, onRequestInfo, onReject, onExport, onPatchClaim }) {
+function priceDraftFromClaim(item) {
+  return {
+    quote: item?.quotePrice != null && item.quotePrice !== '' ? String(item.quotePrice) : '',
+    insurance:
+      item?.insuranceApprovedPrice != null && item.insuranceApprovedPrice !== ''
+        ? String(item.insuranceApprovedPrice)
+        : '',
+  };
+}
+
+function ClaimModal({
+  claimItem,
+  role,
+  authToken,
+  workspaceSave,
+  onClose,
+  onApprove,
+  onReject,
+  onReopen,
+  onExport,
+  onPatchClaim,
+  onUpdatePrices,
+  onSaveAdminNote,
+  onSaveParts,
+  onSaveQuoteWorkspace,
+  onSavePaymentStatus,
+}) {
   const [tab, setTab] = useState('overview');
   const [pdfBusy, setPdfBusy] = useState(false);
+  const [priceDraft, setPriceDraft] = useState(() => priceDraftFromClaim(claimItem));
+  const [quoteSave, setQuoteSave] = useState('idle');
+  const [quoteSaveKind, setQuoteSaveKind] = useState(null);
+  const [insuranceSave, setInsuranceSave] = useState('idle');
+  const [insuranceSaveKind, setInsuranceSaveKind] = useState(null);
+  const [adminNoteDraft, setAdminNoteDraft] = useState(() => claimItem.adminNote ?? '');
+  const [adminNoteSave, setAdminNoteSave] = useState('idle');
+  const [adminNoteSaveKind, setAdminNoteSaveKind] = useState(null);
+  const [partsDraft, setPartsDraft] = useState(() => cloneParts(claimItem.parts));
+  const [partsSave, setPartsSave] = useState('idle');
+  const [partsSaveKind, setPartsSaveKind] = useState(null);
+  const [quoteOptionsDraft, setQuoteOptionsDraft] = useState(() => cloneQuoteOptions(claimItem.quoteOptions));
+  const [primaryQuoteIdDraft, setPrimaryQuoteIdDraft] = useState(claimItem.primaryQuoteId ?? null);
+  const [finalQuoteIdDraft, setFinalQuoteIdDraft] = useState(claimItem.finalQuoteId ?? null);
+  const [repairQuotesSave, setRepairQuotesSave] = useState('idle');
+  const [repairQuotesSaveKind, setRepairQuotesSaveKind] = useState(null);
+  const [paymentStatusDraft, setPaymentStatusDraft] = useState(() =>
+    normalizePaymentStatus(claimItem.paymentStatus),
+  );
+  const [paymentSave, setPaymentSave] = useState('idle');
+  const [paymentSaveKind, setPaymentSaveKind] = useState(null);
   const isModerator = role === 'moderator';
   const fileInputRef = useRef(null);
 
   useEffect(() => {
     setTab('overview');
-  }, [claimItem.id]);
+  }, [claimItem.id, claimItem._id]);
 
-  const patch = (partialOrFn) => onPatchClaim(claimItem.id, partialOrFn);
+  useEffect(() => {
+    setPriceDraft(priceDraftFromClaim(claimItem));
+    setQuoteSave('idle');
+    setQuoteSaveKind(null);
+    setInsuranceSave('idle');
+    setInsuranceSaveKind(null);
+  }, [claimItem.id, claimItem._id, claimItem.quotePrice, claimItem.insuranceApprovedPrice]);
 
-  const patchQuoteField = (quoteId, field, rawValue) => {
-    patch((prev) => ({
-      quoteOptions: (prev.quoteOptions ?? []).map((opt) => {
+  useEffect(() => {
+    setAdminNoteDraft(claimItem.adminNote ?? '');
+    setAdminNoteSave('idle');
+    setAdminNoteSaveKind(null);
+    setPartsDraft(cloneParts(claimItem.parts));
+    setPartsSave('idle');
+    setPartsSaveKind(null);
+    setQuoteOptionsDraft(cloneQuoteOptions(claimItem.quoteOptions));
+    setPrimaryQuoteIdDraft(claimItem.primaryQuoteId ?? null);
+    setFinalQuoteIdDraft(claimItem.finalQuoteId ?? null);
+    setRepairQuotesSave('idle');
+    setRepairQuotesSaveKind(null);
+    setPaymentStatusDraft(normalizePaymentStatus(claimItem.paymentStatus));
+    setPaymentSave('idle');
+    setPaymentSaveKind(null);
+  }, [claimItem.id, claimItem._id]);
+
+  const patch = (partialOrFn) => {
+    const claimId = claimMongoId(claimItem);
+    onPatchClaim(claimId || claimItem.id, partialOrFn);
+  };
+
+  const handleSaveQuotePrice = async () => {
+    if (isModerator || !onUpdatePrices) return;
+    const amount = parseMoneyInput(priceDraft.quote);
+    if (amount == null) {
+      window.alert('Enter a quote price before saving.');
+      return;
+    }
+    const wasUpdate = quotePrice != null;
+    setQuoteSave('saving');
+    setQuoteSaveKind(null);
+    try {
+      const updated = await onUpdatePrices({ quotePrice: amount });
+      setPriceDraft((d) => ({ ...d, ...priceDraftFromClaim(updated) }));
+      setQuoteSaveKind(wasUpdate ? 'updated' : 'saved');
+      setQuoteSave('saved');
+    } catch (e) {
+      setQuoteSave('error');
+      window.alert(e?.message ? String(e.message) : 'Could not save quote price.');
+    }
+  };
+
+  const handleSaveInsurancePrice = async () => {
+    if (isModerator || !onUpdatePrices) return;
+    const amount = parseMoneyInput(priceDraft.insurance);
+    if (amount == null) {
+      window.alert('Enter an insurance company price before saving.');
+      return;
+    }
+    const wasUpdate = insuranceApprovedPrice != null;
+    setInsuranceSave('saving');
+    setInsuranceSaveKind(null);
+    try {
+      const updated = await onUpdatePrices({ insuranceApprovedPrice: amount });
+      setPriceDraft((d) => ({ ...d, ...priceDraftFromClaim(updated) }));
+      setInsuranceSaveKind(wasUpdate ? 'updated' : 'saved');
+      setInsuranceSave('saved');
+    } catch (e) {
+      setInsuranceSave('error');
+      window.alert(e?.message ? String(e.message) : 'Could not save insurance company price.');
+    }
+  };
+
+  const handleSaveAdminNote = async () => {
+    if (isModerator || !onSaveAdminNote) return;
+    const wasUpdate = (claimItem.adminNote ?? '').trim().length > 0;
+    setAdminNoteSave('saving');
+    setAdminNoteSaveKind(null);
+    try {
+      const updated = await onSaveAdminNote(adminNoteDraft);
+      setAdminNoteDraft(updated.adminNote ?? '');
+      setAdminNoteSaveKind(wasUpdate ? 'updated' : 'saved');
+      setAdminNoteSave('saved');
+    } catch (e) {
+      setAdminNoteSave('error');
+      window.alert(e?.message ? String(e.message) : 'Could not save admin note.');
+    }
+  };
+
+  const patchQuoteFieldDraft = (quoteId, field, rawValue) => {
+    setQuoteOptionsDraft((rows) =>
+      rows.map((opt) => {
         if (opt.id !== quoteId) return opt;
         if (field === 'amount') {
           const n = Number(String(rawValue).replace(/,/g, ''));
@@ -1039,13 +1574,22 @@ function ClaimModal({ claimItem, role, onClose, onApprove, onRequestInfo, onReje
         }
         return { ...opt, [field]: rawValue };
       }),
-    }));
+    );
+    if (repairQuotesSave === 'saved') setRepairQuotesSave('idle');
+    setRepairQuotesSaveKind(null);
   };
 
   const caseFiles = claimItem.caseFiles ?? [];
-  const quoteOptions = claimItem.quoteOptions ?? [];
-  const primaryQuoteId = claimItem.primaryQuoteId ?? null;
-  const finalQuoteId = claimItem.finalQuoteId ?? null;
+  const quoteOptions = quoteOptionsDraft;
+  const quotePrice = claimItem.quotePrice ?? null;
+  const insuranceApprovedPrice = claimItem.insuranceApprovedPrice ?? null;
+  const claimStatus = claimItem.status ?? 'Pending Review';
+  const isPendingReview = claimStatus === 'Pending Review';
+  const memberRepairQuoteRef =
+    claimItem.payload?.repairQuoteRef ||
+    claimItem.payload?.checklist?.repairQuoteRef ||
+    claimItem.data?.repairQuoteRef ||
+    '';
 
   const data = claimItem.data ?? {};
   const otherParties = data.otherParties ?? [];
@@ -1060,47 +1604,180 @@ function ClaimModal({ claimItem, role, onClose, onApprove, onRequestInfo, onReje
     ? Object.values(data.damage.points).reduce((count, list) => count + list.length, 0)
     : 0;
 
-  const primaryQuote = quoteOptions.find((q) => q.id === primaryQuoteId);
-  const finalQuote = quoteOptions.find((q) => q.id === finalQuoteId);
+  const paymentStatus = paymentStatusDraft;
+  const adminNote = claimItem.adminNote ?? '';
+  const hasSavedAdminNote = adminNote.trim().length > 0;
+  const isAdminNoteDirty = adminNoteDraft !== adminNote;
+  const hasSavedQuotePrice = quotePrice != null;
+  const isQuotePriceDirty = !moneyAmountsEqual(quotePrice, priceDraft.quote);
+  const hasSavedInsurancePrice = insuranceApprovedPrice != null;
+  const isInsurancePriceDirty = !moneyAmountsEqual(insuranceApprovedPrice, priceDraft.insurance);
+  const savedParts = claimItem.parts ?? [];
+  const parts = partsDraft;
+  const partsPendingCount = parts.filter((p) => p.status === 'pending').length;
+  const partsSummaryText = savedParts.length
+    ? `${savedParts.length} line(s) · ${savedParts.filter((p) => p.status === 'pending').length} pending · ${savedParts.filter((p) => p.status === 'completed').length} completed`
+    : undefined;
+  const hasSavedParts = savedParts.length > 0;
+  const isPartsDirty = !partsEqual(partsDraft, savedParts);
+  const savedQuoteOptions = claimItem.quoteOptions ?? [];
+  const hasSavedRepairQuotes = savedQuoteOptions.length > 0;
+  const isRepairQuotesDirty =
+    !quoteOptionsEqual(quoteOptionsDraft, savedQuoteOptions) ||
+    (primaryQuoteIdDraft ?? null) !== (claimItem.primaryQuoteId ?? null) ||
+    (finalQuoteIdDraft ?? null) !== (claimItem.finalQuoteId ?? null);
+  const savedPaymentStatus = normalizePaymentStatus(claimItem.paymentStatus);
+  const isPaymentDirty = paymentStatusDraft !== savedPaymentStatus;
+
+  const updatePartDraft = (partId, field, raw) => {
+    setPartsDraft((rows) =>
+      rows.map((p) => {
+        if (p.id !== partId) return p;
+        if (field === 'amount') return { ...p, amount: Number(String(raw).replace(/,/g, '')) || 0 };
+        return { ...p, [field]: raw };
+      }),
+    );
+    if (partsSave === 'saved') setPartsSave('idle');
+    setPartsSaveKind(null);
+  };
+  const addPart = () => {
+    if (isModerator) return;
+    setPartsDraft((rows) => [...rows, newPartLine()]);
+    if (partsSave === 'saved') setPartsSave('idle');
+    setPartsSaveKind(null);
+  };
+  const removePart = (partId) => {
+    if (isModerator) return;
+    setPartsDraft((rows) => rows.filter((p) => p.id !== partId));
+    if (partsSave === 'saved') setPartsSave('idle');
+    setPartsSaveKind(null);
+  };
+
+  const addQuote = () => {
+    if (isModerator) return;
+    setQuoteOptionsDraft((rows) => [...rows, newQuoteLine()]);
+    if (repairQuotesSave === 'saved') setRepairQuotesSave('idle');
+    setRepairQuotesSaveKind(null);
+  };
+
+  const handleSaveParts = async () => {
+    if (isModerator || !onSaveParts) return;
+    const wasUpdate = hasSavedParts;
+    setPartsSave('saving');
+    setPartsSaveKind(null);
+    try {
+      const updated = await onSaveParts(partsDraft);
+      setPartsDraft(cloneParts(updated.parts));
+      setPartsSaveKind(wasUpdate ? 'updated' : 'saved');
+      setPartsSave('saved');
+    } catch (e) {
+      setPartsSave('error');
+      window.alert(e?.message ? String(e.message) : 'Could not save supplier lines.');
+    }
+  };
+
+  const handleSaveRepairQuotes = async () => {
+    if (isModerator || !onSaveQuoteWorkspace) return;
+    const wasUpdate = hasSavedRepairQuotes;
+    setRepairQuotesSave('saving');
+    setRepairQuotesSaveKind(null);
+    try {
+      const updated = await onSaveQuoteWorkspace({
+        quoteOptions: quoteOptionsDraft,
+        primaryQuoteId: primaryQuoteIdDraft,
+        finalQuoteId: finalQuoteIdDraft,
+      });
+      setQuoteOptionsDraft(cloneQuoteOptions(updated.quoteOptions));
+      setPrimaryQuoteIdDraft(updated.primaryQuoteId ?? null);
+      setFinalQuoteIdDraft(updated.finalQuoteId ?? null);
+      setRepairQuotesSaveKind(wasUpdate ? 'updated' : 'saved');
+      setRepairQuotesSave('saved');
+    } catch (e) {
+      setRepairQuotesSave('error');
+      window.alert(e?.message ? String(e.message) : 'Could not save repair quotes.');
+    }
+  };
+
+  const handleSavePaymentStatus = async () => {
+    if (isModerator || !onSavePaymentStatus) return;
+    const wasUpdate = true;
+    setPaymentSave('saving');
+    setPaymentSaveKind(null);
+    try {
+      const updated = await onSavePaymentStatus(paymentStatusDraft);
+      setPaymentStatusDraft(normalizePaymentStatus(updated.paymentStatus));
+      setPaymentSaveKind(wasUpdate ? 'updated' : 'saved');
+      setPaymentSave('saved');
+    } catch (e) {
+      setPaymentSave('error');
+      window.alert(e?.message ? String(e.message) : 'Could not save payment status.');
+    }
+  };
 
   const handlePdfInput = async (ev) => {
     const picked = [...(ev.target.files || [])].filter((f) => f.type === 'application/pdf');
     ev.target.value = '';
     if (!picked.length || isModerator) return;
-    const MAX_PDF_BYTES = 2 * 1024 * 1024;
+    const MAX_FALLBACK_BYTES = Number(import.meta.env.VITE_MAX_ADMIN_PDF_BYTES || 25 * 1024 * 1024);
     const ok = [];
     const skip = [];
     for (const f of picked) {
-      if (f.size > MAX_PDF_BYTES) skip.push(f.name);
+      if (f.size > MAX_FALLBACK_BYTES) skip.push(f.name);
       else ok.push(f);
     }
     if (skip.length) {
-      window.alert(
-        `These files were skipped (max ${formatFileSize(MAX_PDF_BYTES)} each for browser storage): ${skip.join(', ')}`,
-      );
+      window.alert(`These files were skipped (limit ${formatFileSize(MAX_FALLBACK_BYTES)}): ${skip.join(', ')}`);
     }
     if (!ok.length) return;
     setPdfBusy(true);
     try {
-      const added = await Promise.all(ok.map((f) => fileToCaseFile(f)));
-      patch((prev) => ({
-        caseFiles: [...(prev.caseFiles ?? []), ...added],
-      }));
-    } catch {
-      window.alert('Could not read one or more PDFs. Try another file.');
+      if (authToken) {
+        const claimId = api.normalizeClaimId(claimItem.id ?? claimItem._id);
+        if (!claimId) {
+          window.alert('Invalid claim id — close this case and open it again from the queue.');
+          return;
+        }
+        let nextList = [...(claimItem.caseFiles ?? [])];
+        for (const f of ok) {
+          nextList = await api.uploadClaimPdf(authToken, claimId, f);
+        }
+        patch((prev) => ({ ...prev, caseFiles: nextList, id: claimId, _id: claimId }));
+      } else {
+        const added = await Promise.all(ok.map((f) => fileToCaseFile(f)));
+        patch((prev) => ({
+          ...prev,
+          caseFiles: [...(prev.caseFiles ?? []), ...added],
+        }));
+      }
+    } catch (e) {
+      window.alert(e?.message ? String(e.message) : 'Could not upload one or more PDFs.');
     } finally {
       setPdfBusy(false);
     }
   };
 
-  const removePdf = (fileId) => {
+  const removePdf = async (fileId) => {
     if (isModerator) return;
-    patch((prev) => {
-      const list = prev.caseFiles ?? [];
-      const target = list.find((f) => f.id === fileId);
-      if (target?.url?.startsWith('blob:')) URL.revokeObjectURL(target.url);
-      return { caseFiles: list.filter((f) => f.id !== fileId) };
-    });
+    const list = claimItem.caseFiles ?? [];
+    const target = list.find((f) => f.id === fileId);
+    const remote = authToken && target?.url?.startsWith('/uploads/');
+    if (remote) {
+      setPdfBusy(true);
+      try {
+        const cf = await api.deleteClaimPdf(authToken, claimMongoId(claimItem), fileId);
+        patch((prev) => ({ ...prev, caseFiles: cf }));
+      } catch (e) {
+        window.alert(e?.message ? String(e.message) : 'Could not delete file.');
+      } finally {
+        setPdfBusy(false);
+      }
+      return;
+    }
+    if (target?.url?.startsWith('blob:')) URL.revokeObjectURL(target.url);
+    patch((prev) => ({
+      ...prev,
+      caseFiles: (prev.caseFiles ?? []).filter((f) => f.id !== fileId),
+    }));
   };
 
   return (
@@ -1114,7 +1791,19 @@ function ClaimModal({ claimItem, role, onClose, onApprove, onRequestInfo, onReje
         <div className="flex shrink-0 flex-col gap-3 border-b border-zinc-200/90 bg-gradient-to-b from-white to-zinc-50/90 px-4 py-3 sm:flex-row sm:items-start sm:justify-between sm:px-6 sm:py-4">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2 text-2xs text-zinc-500">
-              <span className="font-mono font-medium text-zinc-600">{claimRef(claimItem.id)}</span>
+              <span className="font-mono font-medium text-zinc-600" title="Member portal save code">
+                {claimRef(claimItem)}
+              </span>
+              {claimItem.reference && claimItem.intakeReference && claimItem.reference !== claimItem.intakeReference ? (
+                <>
+                  <span className="text-zinc-300" aria-hidden>
+                    ·
+                  </span>
+                  <span className="font-mono text-zinc-400" title="Internal system reference">
+                    {claimItem.reference}
+                  </span>
+                </>
+              ) : null}
               <span className="text-zinc-300" aria-hidden>
                 ·
               </span>
@@ -1167,8 +1856,38 @@ function ClaimModal({ claimItem, role, onClose, onApprove, onRequestInfo, onReje
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin bg-zinc-50/40 px-4 py-4 sm:px-6 sm:py-5">
+            {tab === 'submission' && <MemberSubmissionPanel claimItem={claimItem} />}
+
             {tab === 'overview' && (
               <div className="space-y-4">
+                <div className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner">
+                  <h3 className="text-[13px] font-semibold text-zinc-900">Reference codes</h3>
+                  <p className="mt-1 text-2xs leading-relaxed text-zinc-500">
+                    For this claim only. The member code is the “Claim reference code” from the public portal; the system id is the internal file reference.
+                  </p>
+                  <dl className="mt-3 divide-y divide-zinc-100">
+                    <SummaryItem
+                      label="Member portal"
+                      value={
+                        claimItem.intakeReference ? (
+                          <span className="font-mono text-sm font-medium text-zinc-950">{claimItem.intakeReference}</span>
+                        ) : (
+                          '—'
+                        )
+                      }
+                    />
+                    <SummaryItem
+                      label="System reference"
+                      value={
+                        claimItem.reference ? (
+                          <span className="font-mono text-sm font-medium text-zinc-950">{claimItem.reference}</span>
+                        ) : (
+                          '—'
+                        )
+                      }
+                    />
+                  </dl>
+                </div>
                 <div className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner">
                   <h3 className="text-[13px] font-semibold text-zinc-900">Case facts</h3>
                   <dl className="mt-1 divide-y divide-zinc-100">
@@ -1181,26 +1900,28 @@ function ClaimModal({ claimItem, role, onClose, onApprove, onRequestInfo, onReje
                       value={caseFiles.length ? `${caseFiles.length} PDF${caseFiles.length === 1 ? '' : 's'}` : undefined}
                     />
                     <SummaryItem
-                      label="Primary quote"
+                      label="Quote price (you set)"
+                      value={quotePrice != null ? formatAud(quotePrice) : undefined}
+                    />
+                    <SummaryItem
+                      label="Insurance company price"
+                      value={insuranceApprovedPrice != null ? formatAud(insuranceApprovedPrice) : undefined}
+                    />
+                    <SummaryItem label="Payment" value={paymentStatusLabel(paymentStatus)} />
+                    <SummaryItem
+                      label="Admin note"
                       value={
-                        primaryQuote
-                          ? `${primaryQuote.supplier} (${formatAud(primaryQuote.amount)})`
+                        adminNote.trim()
+                          ? `${adminNote.trim().slice(0, 140)}${adminNote.trim().length > 140 ? '…' : ''}`
                           : undefined
                       }
                     />
-                    <SummaryItem
-                      label="Final quote"
-                      value={
-                        finalQuote ? `${finalQuote.supplier} (${formatAud(finalQuote.amount)})` : undefined
-                      }
-                    />
+                    <SummaryItem label="Parts" value={partsSummaryText} />
                   </dl>
                   {!isModerator && (
                     <div className="mt-4 rounded-xl border border-indigo-200/90 bg-indigo-50/70 p-3.5">
                       <p className="text-xs leading-relaxed text-indigo-950">
-                        The fields above stay on Overview for a quick read. To type quote details, choose primary/final,
-                        and upload PDFs, open <span className="font-semibold">Quotes & PDFs</span>. Changes persist in this
-                        browser until you wire a backend.
+                        Changes save to Horizon API (insurance quote, supplier parts, notes). Upload PDFs on the insurance quote tab.
                       </p>
                       <button
                         type="button"
@@ -1208,7 +1929,7 @@ function ClaimModal({ claimItem, role, onClose, onApprove, onRequestInfo, onReje
                         className="mt-2.5 inline-flex h-9 items-center gap-2 rounded-lg bg-indigo-600 px-3 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
                       >
                         <FileText className="h-3.5 w-3.5" strokeWidth={2} />
-                        Open Quotes & PDFs
+                        Open insurance quote
                       </button>
                     </div>
                   )}
@@ -1367,13 +2088,153 @@ function ClaimModal({ claimItem, role, onClose, onApprove, onRequestInfo, onReje
 
             {tab === 'quotes' && (
               <div className="space-y-6">
+                <section className="rounded-xl border border-indigo-200/80 bg-indigo-50/20 p-4 shadow-inner sm:p-5">
+                  <h3 className="text-[13px] font-semibold text-zinc-900">Pricing</h3>
+                  <p className="mt-1 text-2xs leading-relaxed text-zinc-600 sm:text-xs">
+                    <span className="font-medium text-zinc-800">Quote price</span> is set by your repair shop.{' '}
+                    <span className="font-medium text-zinc-800">Insurance company price</span> is decided by the insurer — enter it when you receive their approval.
+                  </p>
+                  {memberRepairQuoteRef ? (
+                    <p className="mt-2 text-2xs text-zinc-600">
+                      Member repair quote ref:{' '}
+                      <span className="font-mono font-medium text-zinc-800">{memberRepairQuoteRef}</span>
+                    </p>
+                  ) : null}
+                  <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                    <div>
+                      <label htmlFor={`quote-price-${claimItem.id}`} className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">
+                        Quote price
+                      </label>
+                      <p className="mt-0.5 text-2xs text-zinc-500">Set by Horizon Smash Repairs</p>
+                      {!isModerator ? (
+                        <>
+                          <input
+                            id={`quote-price-${claimItem.id}`}
+                            type="number"
+                            min={0}
+                            step={0.01}
+                            value={priceDraft.quote}
+                            onChange={(e) => {
+                              setPriceDraft((d) => ({ ...d, quote: e.target.value }));
+                              if (quoteSave === 'saved') setQuoteSave('idle');
+                              setQuoteSaveKind(null);
+                            }}
+                            placeholder="0.00"
+                            className="mt-1.5 h-10 w-full rounded-lg border border-zinc-200 bg-white px-2.5 font-mono text-sm text-zinc-900 shadow-inner outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/15"
+                          />
+                          <p className="mt-1 font-mono text-2xs text-zinc-500">
+                            {quotePrice != null
+                              ? `Quote price: ${formatAud(quotePrice)}`
+                              : priceDraft.quote !== ''
+                                ? formatAud(parseMoneyInput(priceDraft.quote) ?? 0)
+                                : 'Not set'}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={handleSaveQuotePrice}
+                            disabled={
+                              quoteSave === 'saving' ||
+                              parseMoneyInput(priceDraft.quote) == null ||
+                              (!isQuotePriceDirty && hasSavedQuotePrice)
+                            }
+                            className="mt-3 inline-flex h-9 w-full items-center justify-center rounded-lg bg-indigo-600 px-3 text-2xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
+                          >
+                            {saveUpdateLabel({
+                              hasSaved: hasSavedQuotePrice,
+                              busy: quoteSave === 'saving',
+                              entity: 'quote price',
+                            })}
+                          </button>
+                          {quoteSave === 'saved' && quotePrice != null && (
+                            <p className="mt-1.5 text-2xs font-medium text-emerald-700">
+                              {quoteSaveKind === 'updated' ? 'Quote price updated' : 'Quote price saved'} (
+                              {formatAud(quotePrice)}).
+                            </p>
+                          )}
+                          {quoteSave === 'error' && (
+                            <p className="mt-1.5 text-2xs font-medium text-rose-700">Save failed — try again.</p>
+                          )}
+                        </>
+                      ) : (
+                        <p className="mt-1.5 font-mono text-lg font-semibold text-zinc-900">
+                          {quotePrice != null ? formatAud(quotePrice) : '—'}
+                        </p>
+                      )}
+                    </div>
+                    <div>
+                      <label
+                        htmlFor={`insurance-approved-${claimItem.id}`}
+                        className="text-2xs font-semibold uppercase tracking-wider text-zinc-500"
+                      >
+                        Insurance company price
+                      </label>
+                      <p className="mt-0.5 text-2xs text-zinc-500">Decided by the insurer</p>
+                      {!isModerator ? (
+                        <>
+                          <input
+                            id={`insurance-approved-${claimItem.id}`}
+                            type="number"
+                            min={0}
+                            step={0.01}
+                            value={priceDraft.insurance}
+                            onChange={(e) => {
+                              setPriceDraft((d) => ({ ...d, insurance: e.target.value }));
+                              if (insuranceSave === 'saved') setInsuranceSave('idle');
+                              setInsuranceSaveKind(null);
+                            }}
+                            placeholder="0.00"
+                            className="mt-1.5 h-10 w-full rounded-lg border border-zinc-200 bg-white px-2.5 font-mono text-sm text-zinc-900 shadow-inner outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/15"
+                          />
+                          <p className="mt-1 font-mono text-2xs text-zinc-500">
+                            {insuranceApprovedPrice != null
+                              ? `Insurance company price: ${formatAud(insuranceApprovedPrice)}`
+                              : priceDraft.insurance !== ''
+                                ? formatAud(parseMoneyInput(priceDraft.insurance) ?? 0)
+                                : 'Not set'}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={handleSaveInsurancePrice}
+                            disabled={
+                              insuranceSave === 'saving' ||
+                              parseMoneyInput(priceDraft.insurance) == null ||
+                              (!isInsurancePriceDirty && hasSavedInsurancePrice)
+                            }
+                            className="mt-3 inline-flex h-9 w-full items-center justify-center rounded-lg bg-indigo-600 px-3 text-2xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
+                          >
+                            {saveUpdateLabel({
+                              hasSaved: hasSavedInsurancePrice,
+                              busy: insuranceSave === 'saving',
+                              entity: 'insurance price',
+                            })}
+                          </button>
+                          {insuranceSave === 'saved' && insuranceApprovedPrice != null && (
+                            <p className="mt-1.5 text-2xs font-medium text-emerald-700">
+                              {insuranceSaveKind === 'updated' ? 'Insurance price updated' : 'Insurance price saved'}{' '}
+                              ({formatAud(insuranceApprovedPrice)}).
+                            </p>
+                          )}
+                          {insuranceSave === 'error' && (
+                            <p className="mt-1.5 text-2xs font-medium text-rose-700">Save failed — try again.</p>
+                          )}
+                        </>
+                      ) : (
+                        <p className="mt-1.5 font-mono text-lg font-semibold text-zinc-900">
+                          {insuranceApprovedPrice != null ? formatAud(insuranceApprovedPrice) : '—'}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </section>
+
                 <section className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner sm:p-5">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
                       <h3 className="text-[13px] font-semibold text-zinc-900">Case PDFs</h3>
                       <p className="mt-1 text-2xs leading-relaxed text-zinc-600 sm:text-xs">
-                        PDFs are stored in this browser (base64 in localStorage, max 2&nbsp;MB per file). Replace with your
-                        upload API for production.
+                        PDFs are uploaded to your Horizon API (<span className="font-semibold">{api.apiBase()}</span>) under
+                        <span className="font-mono"> /uploads</span>. Administrators can attach files up to the server limit
+                        (defaults to 25&nbsp;MB per file).
                       </p>
                     </div>
                     {!isModerator && (
@@ -1393,7 +2254,7 @@ function ClaimModal({ claimItem, role, onClose, onApprove, onRequestInfo, onReje
                           className="inline-flex h-10 shrink-0 items-center gap-2 rounded-xl border border-indigo-200/90 bg-indigo-50 px-3 text-xs font-semibold text-indigo-900 transition hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 disabled:cursor-wait disabled:opacity-70"
                         >
                           <Upload className="h-4 w-4" strokeWidth={2} />
-                          {pdfBusy ? 'Reading PDF…' : 'Upload PDF'}
+                          {pdfBusy ? (authToken ? 'Uploading…' : 'Reading PDF…') : 'Upload PDF'}
                         </button>
                       </>
                     )}
@@ -1414,7 +2275,7 @@ function ClaimModal({ claimItem, role, onClose, onApprove, onRequestInfo, onReje
                             </p>
                           </div>
                           <a
-                            href={file.dataUrl || file.url}
+                            href={resolveClaimFileHref(file.dataUrl || file.url)}
                             target="_blank"
                             rel="noreferrer"
                             className="rounded-lg border border-zinc-200 px-2 py-1 text-2xs font-semibold text-zinc-700 hover:bg-zinc-50"
@@ -1424,6 +2285,7 @@ function ClaimModal({ claimItem, role, onClose, onApprove, onRequestInfo, onReje
                           {!isModerator && (
                             <button
                               type="button"
+                              disabled={pdfBusy}
                               onClick={() => removePdf(file.id)}
                               className="rounded-lg border border-rose-200/90 p-1.5 text-rose-700 hover:bg-rose-50"
                               aria-label={`Remove ${file.name}`}
@@ -1438,106 +2300,69 @@ function ClaimModal({ claimItem, role, onClose, onApprove, onRequestInfo, onReje
                 </section>
 
                 <section className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner sm:p-5">
-                  <h3 className="text-[13px] font-semibold text-zinc-900">Repair quotes</h3>
-                  <p className="mt-1 text-2xs leading-relaxed text-zinc-600 sm:text-xs">
-                    Type workshop name, reference, and amount for each line, then mark which line is{' '}
-                    <span className="font-medium text-zinc-800">primary</span> and which is{' '}
-                    <span className="font-medium text-zinc-800">final</span>. Both can point at the same line if needed.
-                  </p>
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-[13px] font-semibold text-zinc-900">Repair quotes</h3>
+                      <p className="mt-1 text-2xs leading-relaxed text-zinc-600 sm:text-xs">
+                        Optional workshop lines. Add notes on each quote for internal context.
+                      </p>
+                    </div>
+                    {!isModerator && (
+                      <button
+                        type="button"
+                        onClick={addQuote}
+                        className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-indigo-200/90 bg-indigo-50 px-2.5 text-2xs font-semibold text-indigo-900 hover:bg-indigo-100"
+                      >
+                        <Plus className="h-3.5 w-3.5" strokeWidth={2} />
+                        Add quote
+                      </button>
+                    )}
+                  </div>
+                  {quoteOptions.length === 0 ? (
+                    <p className="mt-4 rounded-xl border border-dashed border-zinc-200 bg-zinc-50 px-4 py-8 text-center text-sm text-zinc-500">
+                      No repair quotes yet. Add a line to compare workshops.
+                    </p>
+                  ) : (
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                    {quoteOptions.map((q) => {
-                      const isPrimary = primaryQuoteId === q.id;
-                      const isFinal = finalQuoteId === q.id;
-                      return (
+                    {quoteOptions.map((q) => (
                         <div
                           key={q.id}
-                          className={`rounded-xl border px-4 py-4 shadow-inner ${
-                            isPrimary && isFinal
-                              ? 'border-indigo-300/90 bg-gradient-to-br from-indigo-50/60 to-violet-50/50 ring-1 ring-indigo-200/40'
-                              : isFinal
-                                ? 'border-violet-300/90 bg-violet-50/35 ring-1 ring-violet-200/60'
-                                : isPrimary
-                                  ? 'border-indigo-300/90 bg-indigo-50/30 ring-1 ring-indigo-200/50'
-                                  : 'border-zinc-200/90 bg-zinc-50/40'
-                          }`}
+                          className="rounded-xl border border-zinc-200/90 bg-zinc-50/40 px-4 py-4 shadow-inner"
                         >
-                          <div className="mb-3 flex flex-wrap items-center justify-end gap-1">
-                            {isPrimary && (
-                              <span className="rounded-md border border-indigo-200 bg-white px-1.5 py-0.5 text-2xs font-bold uppercase tracking-wide text-indigo-800">
-                                Primary
-                              </span>
-                            )}
-                            {isFinal && (
-                              <span className="inline-flex items-center gap-0.5 rounded-md border border-violet-200 bg-white px-1.5 py-0.5 text-2xs font-bold uppercase tracking-wide text-violet-900">
-                                <BadgeCheck className="h-3 w-3" strokeWidth={2} aria-hidden />
-                                Final
-                              </span>
-                            )}
-                          </div>
-
                           {!isModerator ? (
                             <div className="space-y-3">
+                              <input
+                                type="text"
+                                value={q.supplier}
+                                onChange={(e) => patchQuoteFieldDraft(q.id, 'supplier', e.target.value)}
+                                aria-label="Workshop or supplier"
+                                placeholder="Workshop"
+                                className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-2.5 text-sm text-zinc-900 shadow-inner outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/15"
+                                autoComplete="off"
+                              />
+                              <input
+                                type="number"
+                                min={0}
+                                step={1}
+                                value={Number.isFinite(q.amount) ? q.amount : 0}
+                                onChange={(e) => patchQuoteFieldDraft(q.id, 'amount', e.target.value)}
+                                aria-label="Amount in Australian dollars"
+                                placeholder="0"
+                                className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-2.5 font-mono text-sm text-zinc-900 shadow-inner outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/15"
+                              />
+                              <p className="font-mono text-2xs text-zinc-500 tabular-nums">{formatAud(q.amount)}</p>
                               <div>
-                                <label className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">
-                                  Workshop / supplier
+                                <label htmlFor={`quote-notes-${q.id}`} className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">
+                                  Notes
                                 </label>
-                                <input
-                                  type="text"
-                                  value={q.supplier}
-                                  onChange={(e) => patchQuoteField(q.id, 'supplier', e.target.value)}
-                                  className="mt-1 h-9 w-full rounded-lg border border-zinc-200 bg-white px-2.5 text-sm text-zinc-900 shadow-inner outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/15"
-                                  placeholder="e.g. Northside Panels"
-                                  autoComplete="off"
+                                <textarea
+                                  id={`quote-notes-${q.id}`}
+                                  rows={3}
+                                  value={q.notes ?? ''}
+                                  onChange={(e) => patchQuoteFieldDraft(q.id, 'notes', e.target.value)}
+                                  placeholder="e.g. Waiting on insurer, includes OEM parts…"
+                                  className="mt-1 w-full resize-y rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm text-zinc-900 shadow-inner outline-none placeholder:text-zinc-400 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/15"
                                 />
-                              </div>
-                              <div>
-                                <label className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">
-                                  Quote reference
-                                </label>
-                                <input
-                                  type="text"
-                                  value={q.reference}
-                                  onChange={(e) => patchQuoteField(q.id, 'reference', e.target.value)}
-                                  className="mt-1 h-9 w-full rounded-lg border border-zinc-200 bg-white px-2.5 font-mono text-sm text-zinc-900 shadow-inner outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/15"
-                                  placeholder="e.g. NSP-2026-041"
-                                  autoComplete="off"
-                                />
-                              </div>
-                              <div>
-                                <label className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">
-                                  Amount (AUD)
-                                </label>
-                                <input
-                                  type="number"
-                                  min={0}
-                                  step={1}
-                                  value={Number.isFinite(q.amount) ? q.amount : 0}
-                                  onChange={(e) => patchQuoteField(q.id, 'amount', e.target.value)}
-                                  className="mt-1 h-9 w-full rounded-lg border border-zinc-200 bg-white px-2.5 font-mono text-sm text-zinc-900 shadow-inner outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/15"
-                                />
-                                <p className="mt-1 font-mono text-2xs text-zinc-500">{formatAud(q.amount)}</p>
-                              </div>
-                              <div className="space-y-2.5 border-t border-zinc-200/80 pt-3">
-                                <label className="flex cursor-pointer items-center gap-2 text-2xs font-semibold text-zinc-700">
-                                  <input
-                                    type="radio"
-                                    name={`primary-quote-${claimItem.id}`}
-                                    className="h-4 w-4 border-zinc-300 text-indigo-600 focus:ring-indigo-500"
-                                    checked={isPrimary}
-                                    onChange={() => patch({ primaryQuoteId: q.id })}
-                                  />
-                                  Use as primary quote
-                                </label>
-                                <label className="flex cursor-pointer items-center gap-2 text-2xs font-semibold text-zinc-700">
-                                  <input
-                                    type="radio"
-                                    name={`final-quote-${claimItem.id}`}
-                                    className="h-4 w-4 border-zinc-300 text-violet-600 focus:ring-violet-500"
-                                    checked={isFinal}
-                                    onChange={() => patch({ finalQuoteId: q.id })}
-                                  />
-                                  Use as final quote
-                                </label>
                               </div>
                             </div>
                           ) : (
@@ -1546,38 +2371,327 @@ function ClaimModal({ claimItem, role, onClose, onApprove, onRequestInfo, onReje
                                 {formatAud(q.amount)}
                               </p>
                               <p className="text-sm font-semibold text-zinc-900">{q.supplier}</p>
-                              <p className="font-mono text-2xs text-zinc-500">{q.reference}</p>
-                              {(isPrimary || isFinal) && (
-                                <p className="mt-3 text-2xs leading-relaxed text-zinc-600">
-                                  {isPrimary && <span className="font-medium text-zinc-800">Primary quote. </span>}
-                                  {isFinal && <span className="font-medium text-zinc-800">Final quote.</span>}
-                                </p>
-                              )}
+                              {(q.notes ?? '').trim() ? (
+                                <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-600">{q.notes}</p>
+                              ) : null}
                             </div>
                           )}
                         </div>
-                      );
-                    })}
+                    ))}
                   </div>
+                  )}
                   {!isModerator && (
-                    <div className="mt-4 flex flex-wrap gap-2 border-t border-zinc-100 pt-4">
-                      {primaryQuoteId && (
+                    <div className="mt-4">
+                      <button
+                        type="button"
+                        onClick={handleSaveRepairQuotes}
+                        disabled={repairQuotesSave === 'saving' || (!isRepairQuotesDirty && hasSavedRepairQuotes)}
+                        className="inline-flex h-9 items-center justify-center rounded-lg bg-indigo-600 px-4 text-2xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {saveUpdateLabel({
+                          hasSaved: hasSavedRepairQuotes,
+                          busy: repairQuotesSave === 'saving',
+                          entity: 'repair quotes',
+                        })}
+                      </button>
+                      {repairQuotesSave === 'saved' && (
+                        <p className="mt-1.5 text-2xs font-medium text-emerald-700">
+                          {repairQuotesSaveKind === 'updated' ? 'Repair quotes updated.' : 'Repair quotes saved.'}
+                        </p>
+                      )}
+                      {repairQuotesSave === 'error' && (
+                        <p className="mt-1.5 text-2xs font-medium text-rose-700">Could not save — try again.</p>
+                      )}
+                      {hasSavedRepairQuotes && !isRepairQuotesDirty && repairQuotesSave !== 'saved' && (
+                        <p className="mt-1.5 text-2xs text-zinc-500">Repair quotes are saved. Edit a field to enable Update.</p>
+                      )}
+                      {isRepairQuotesDirty && repairQuotesSave !== 'saved' && (
+                        <p className="mt-1.5 text-2xs text-amber-800">You have unsaved changes.</p>
+                      )}
+                    </div>
+                  )}
+                </section>
+
+                <section className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner sm:p-5">
+                  <div className="flex flex-wrap items-start gap-3">
+                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-zinc-200/90 bg-zinc-50 text-zinc-700 shadow-inner">
+                      <Banknote className="h-5 w-5" strokeWidth={2} />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <h3 className="text-[13px] font-semibold text-zinc-900">Payment status</h3>
+                      <p className="mt-1 text-2xs leading-relaxed text-zinc-600 sm:text-xs">
+                        Track whether payment for this claim is still pending or marked completed.
+                      </p>
+                      <div className="mt-3 max-w-xs">
+                        <label htmlFor={`pay-status-${claimItem.id}`} className="sr-only">
+                          Payment status
+                        </label>
+                        <select
+                          id={`pay-status-${claimItem.id}`}
+                          value={paymentStatus}
+                          disabled={isModerator}
+                          onChange={(e) => {
+                            setPaymentStatusDraft(normalizePaymentStatus(e.target.value));
+                            if (paymentSave === 'saved') setPaymentSave('idle');
+                            setPaymentSaveKind(null);
+                          }}
+                          className="h-10 w-full rounded-lg border border-zinc-200 bg-white px-2.5 text-sm font-medium text-zinc-900 shadow-inner outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/15 disabled:cursor-not-allowed disabled:bg-zinc-100"
+                        >
+                          {PAYMENT_STATUS_OPTIONS.map((opt) => (
+                            <option key={opt.id} value={opt.id}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      {!isModerator && (
                         <button
                           type="button"
-                          onClick={() => patch({ primaryQuoteId: null })}
-                          className="rounded-lg border border-zinc-200/90 bg-white px-2.5 py-1.5 text-2xs font-semibold text-zinc-600 hover:bg-zinc-50"
+                          onClick={handleSavePaymentStatus}
+                          disabled={paymentSave === 'saving' || !isPaymentDirty}
+                          className="mt-3 inline-flex h-9 items-center justify-center rounded-lg bg-indigo-600 px-4 text-2xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 disabled:cursor-not-allowed disabled:opacity-60"
                         >
-                          Clear primary
+                          {saveUpdateLabel({
+                            hasSaved: true,
+                            busy: paymentSave === 'saving',
+                            entity: 'payment status',
+                          })}
                         </button>
                       )}
-                      {finalQuoteId && (
-                        <button
-                          type="button"
-                          onClick={() => patch({ finalQuoteId: null })}
-                          className="rounded-lg border border-zinc-200/90 bg-white px-2.5 py-1.5 text-2xs font-semibold text-zinc-600 hover:bg-zinc-50"
-                        >
-                          Clear final
-                        </button>
+                      {paymentSave === 'saved' && (
+                        <p className="mt-1.5 text-2xs font-medium text-emerald-700">Payment status updated.</p>
+                      )}
+                      {paymentSave === 'error' && (
+                        <p className="mt-1.5 text-2xs font-medium text-rose-700">Could not save — try again.</p>
+                      )}
+                      {isPaymentDirty && paymentSave !== 'saved' && (
+                        <p className="mt-1.5 text-2xs text-amber-800">You have unsaved changes.</p>
+                      )}
+                    </div>
+                    <div className="shrink-0">
+                      <PaymentStatusBadge status={paymentStatus} />
+                    </div>
+                  </div>
+                </section>
+
+                <section className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner sm:p-5">
+                  <h3 className="text-[13px] font-semibold text-zinc-900">Admin note</h3>
+                  <p className="mt-1 text-2xs text-zinc-600">
+                    Internal notes visible to administrators and moderators on this case file.
+                  </p>
+                  <label htmlFor={`admin-note-${claimItem.id}`} className="sr-only">
+                    Admin note
+                  </label>
+                  <textarea
+                    id={`admin-note-${claimItem.id}`}
+                    rows={5}
+                    value={isModerator ? adminNote : adminNoteDraft}
+                    readOnly={isModerator}
+                    onChange={(e) => {
+                      if (isModerator) return;
+                      setAdminNoteDraft(e.target.value);
+                      if (adminNoteSave === 'saved') setAdminNoteSave('idle');
+                      setAdminNoteSaveKind(null);
+                    }}
+                    placeholder="e.g. Called member — awaiting bank details."
+                    className="mt-3 w-full resize-y rounded-lg border border-zinc-200 bg-white px-3 py-2.5 text-sm text-zinc-900 shadow-inner outline-none placeholder:text-zinc-400 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/15 read-only:bg-zinc-50 read-only:text-zinc-700"
+                  />
+                  {!isModerator && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={handleSaveAdminNote}
+                        disabled={
+                          adminNoteSave === 'saving' ||
+                          !adminNoteDraft.trim() ||
+                          (!isAdminNoteDirty && hasSavedAdminNote)
+                        }
+                        className="mt-3 inline-flex h-9 items-center justify-center rounded-lg bg-indigo-600 px-4 text-2xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {saveUpdateLabel({
+                          hasSaved: hasSavedAdminNote,
+                          busy: adminNoteSave === 'saving',
+                          entity: 'admin note',
+                        })}
+                      </button>
+                      {adminNoteSave === 'saved' && (
+                        <p className="mt-1.5 text-2xs font-medium text-emerald-700">
+                          {adminNoteSaveKind === 'updated' ? 'Admin note updated.' : 'Admin note saved.'}
+                        </p>
+                      )}
+                      {adminNoteSave === 'error' && (
+                        <p className="mt-1.5 text-2xs font-medium text-rose-700">Could not save — try again.</p>
+                      )}
+                      {hasSavedAdminNote && !isAdminNoteDirty && adminNoteSave !== 'saved' && (
+                        <p className="mt-1.5 text-2xs text-zinc-500">Note is saved. Edit the text above to enable Update.</p>
+                      )}
+                      {hasSavedAdminNote && isAdminNoteDirty && adminNoteSave !== 'saved' && (
+                        <p className="mt-1.5 text-2xs text-amber-800">You have unsaved changes.</p>
+                      )}
+                    </>
+                  )}
+                </section>
+              </div>
+            )}
+
+            {tab === 'payments' && (
+              <div className="space-y-6">
+                <section className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner sm:p-5">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-start gap-3">
+                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-zinc-200/90 bg-zinc-50 text-zinc-700 shadow-inner">
+                        <Package className="h-5 w-5" strokeWidth={2} />
+                      </span>
+                      <div>
+                        <h3 className="text-[13px] font-semibold text-zinc-900">Supplier</h3>
+                        <p className="mt-1 text-2xs leading-relaxed text-zinc-600 sm:text-xs">
+                          Supplier or part company, line amount (AUD), optional notes, and line status (pending or completed).
+                        </p>
+                      </div>
+                    </div>
+                    {!isModerator && (
+                      <button
+                        type="button"
+                        onClick={addPart}
+                        className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-indigo-200/90 bg-indigo-50 px-2.5 text-2xs font-semibold text-indigo-900 hover:bg-indigo-100"
+                      >
+                        <Plus className="h-3.5 w-3.5" strokeWidth={2} />
+                        Add part line
+                      </button>
+                    )}
+                  </div>
+
+                  {parts.length === 0 ? (
+                    <p className="mt-4 rounded-xl border border-dashed border-zinc-200 bg-zinc-50 px-4 py-8 text-center text-sm text-zinc-500">
+                      No part lines yet.
+                      {!isModerator && ' Use Add part line to create a row.'}
+                    </p>
+                  ) : (
+                    <div className="mt-4 overflow-x-auto scrollbar-thin">
+                      <table className="min-w-[640px] w-full border-collapse text-left text-[13px]">
+                        <thead>
+                          <tr className="border-b border-zinc-200 bg-zinc-50/95">
+                            <th className="px-2 py-2 text-2xs font-semibold uppercase tracking-wider text-zinc-500">
+                              Company
+                            </th>
+                            <th className="px-2 py-2 text-2xs font-semibold uppercase tracking-wider text-zinc-500">
+                              Amount (AUD)
+                            </th>
+                            <th className="px-2 py-2 text-2xs font-semibold uppercase tracking-wider text-zinc-500">
+                              Notes
+                            </th>
+                            <th className="px-2 py-2 text-2xs font-semibold uppercase tracking-wider text-zinc-500">
+                              Status
+                            </th>
+                            {!isModerator && <th className="w-10 px-2 py-2" aria-hidden />}
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-zinc-100">
+                          {parts.map((p) => (
+                            <tr key={p.id}>
+                              <td className="px-2 py-2 align-top">
+                                {!isModerator ? (
+                                  <input
+                                    type="text"
+                                    value={p.company}
+                                    onChange={(e) => updatePartDraft(p.id, 'company', e.target.value)}
+                                    className="h-9 w-full min-w-[140px] rounded-lg border border-zinc-200 bg-white px-2 text-sm outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-500/20"
+                                    placeholder="Supplier name"
+                                  />
+                                ) : (
+                                  <span className="text-sm text-zinc-900">{p.company || '—'}</span>
+                                )}
+                              </td>
+                              <td className="px-2 py-2 align-top">
+                                {!isModerator ? (
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    step={1}
+                                    value={Number.isFinite(p.amount) ? p.amount : 0}
+                                    onChange={(e) => updatePartDraft(p.id, 'amount', e.target.value)}
+                                    className="h-9 w-full max-w-[140px] rounded-lg border border-zinc-200 bg-white px-2 font-mono text-sm outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-500/20"
+                                  />
+                                ) : (
+                                  <span className="font-mono text-sm text-zinc-900">{formatAud(p.amount)}</span>
+                                )}
+                              </td>
+                              <td className="px-2 py-2 align-top">
+                                {!isModerator ? (
+                                  <input
+                                    type="text"
+                                    value={p.notes ?? ''}
+                                    onChange={(e) => updatePartDraft(p.id, 'notes', e.target.value)}
+                                    aria-label="Part notes"
+                                    className="h-9 w-full min-w-[160px] rounded-lg border border-zinc-200 bg-white px-2 text-sm outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-500/20"
+                                    placeholder="Notes"
+                                  />
+                                ) : (
+                                  <span className="text-sm text-zinc-700">{p.notes?.trim() ? p.notes : '—'}</span>
+                                )}
+                              </td>
+                              <td className="px-2 py-2 align-top">
+                                {!isModerator ? (
+                                  <select
+                                    value={p.status === 'completed' ? 'completed' : 'pending'}
+                                    onChange={(e) => updatePartDraft(p.id, 'status', e.target.value)}
+                                    className="h-9 rounded-lg border border-zinc-200 bg-white px-2 text-sm font-medium outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-500/20"
+                                  >
+                                    {PART_STATUS_OPTIONS.map((opt) => (
+                                      <option key={opt.id} value={opt.id}>
+                                        {opt.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : (
+                                  <PartStatusBadge status={p.status} />
+                                )}
+                              </td>
+                              {!isModerator && (
+                                <td className="px-2 py-2 align-top">
+                                  <button
+                                    type="button"
+                                    onClick={() => removePart(p.id)}
+                                    className="rounded-lg border border-rose-200/90 p-1.5 text-rose-700 hover:bg-rose-50"
+                                    aria-label="Remove part line"
+                                  >
+                                    <Trash2 className="h-4 w-4" strokeWidth={2} />
+                                  </button>
+                                </td>
+                              )}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  {!isModerator && (
+                    <div className="mt-4">
+                      <button
+                        type="button"
+                        onClick={handleSaveParts}
+                        disabled={partsSave === 'saving' || (!isPartsDirty && hasSavedParts)}
+                        className="inline-flex h-9 items-center justify-center rounded-lg bg-indigo-600 px-4 text-2xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {saveUpdateLabel({
+                          hasSaved: hasSavedParts,
+                          busy: partsSave === 'saving',
+                          entity: 'supplier lines',
+                        })}
+                      </button>
+                      {partsSave === 'saved' && (
+                        <p className="mt-1.5 text-2xs font-medium text-emerald-700">
+                          {partsSaveKind === 'updated' ? 'Supplier lines updated.' : 'Supplier lines saved.'}
+                        </p>
+                      )}
+                      {partsSave === 'error' && (
+                        <p className="mt-1.5 text-2xs font-medium text-rose-700">Could not save — try again.</p>
+                      )}
+                      {hasSavedParts && !isPartsDirty && partsSave !== 'saved' && (
+                        <p className="mt-1.5 text-2xs text-zinc-500">Supplier lines are saved. Edit a field to enable Update.</p>
+                      )}
+                      {isPartsDirty && partsSave !== 'saved' && (
+                        <p className="mt-1.5 text-2xs text-amber-800">You have unsaved changes.</p>
                       )}
                     </div>
                   )}
@@ -1590,8 +2704,8 @@ function ClaimModal({ claimItem, role, onClose, onApprove, onRequestInfo, onReje
             <div className="flex shrink-0 flex-col gap-3 border-t border-zinc-200/90 bg-zinc-50/95 px-4 py-4 backdrop-blur-sm sm:flex-row sm:items-center sm:justify-between sm:px-6">
               <p className="text-2xs leading-relaxed text-zinc-600 sm:max-w-xl sm:text-xs">
                 This case file is read-only. You can read every tab and field shown to administrators; you cannot change
-                status, request documents, export, upload PDFs, set primary quotes, set final quotes, or otherwise modify the
-                record from this role.
+                status, request documents, export, upload PDFs, set primary or final quotes, payment status, admin notes,
+                supplier lines, or otherwise modify the record from this role.
               </p>
               <button
                 type="button"
@@ -1603,7 +2717,9 @@ function ClaimModal({ claimItem, role, onClose, onApprove, onRequestInfo, onReje
             </div>
           ) : (
             <div className="flex shrink-0 flex-col gap-2 border-t border-zinc-200/90 bg-white/95 px-4 py-3 shadow-[0_-8px_24px_-12px_rgba(0,0,0,0.08)] backdrop-blur-md sm:flex-row sm:items-center sm:justify-between sm:px-6">
-              <p className="hidden text-2xs text-zinc-500 sm:block">Actions apply immediately to this case file.</p>
+              <p className="text-2xs text-zinc-500 sm:max-w-sm">
+                Use Save or Update on each section (insurance quote, supplier, admin note) to persist changes.
+              </p>
               <div className="flex flex-wrap gap-2 sm:justify-end">
                 <button
                   type="button"
@@ -1613,27 +2729,32 @@ function ClaimModal({ claimItem, role, onClose, onApprove, onRequestInfo, onReje
                   <Download className="h-3.5 w-3.5" strokeWidth={2} />
                   Export PDF
                 </button>
-                <button
-                  type="button"
-                  onClick={onReject}
-                  className="h-10 flex-1 rounded-xl border border-rose-200/90 bg-rose-50 px-3 text-xs font-semibold text-rose-900 transition hover:bg-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/80 sm:flex-none"
-                >
-                  Reject
-                </button>
-                <button
-                  type="button"
-                  onClick={onRequestInfo}
-                  className="h-10 flex-1 rounded-xl border border-amber-200/90 bg-amber-50 px-3 text-xs font-semibold text-amber-950 transition hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/80 sm:flex-none"
-                >
-                  Request info
-                </button>
-                <button
-                  type="button"
-                  onClick={onApprove}
-                  className="h-10 flex-1 rounded-xl bg-emerald-600 px-3 text-xs font-semibold text-white shadow-md shadow-emerald-900/10 transition hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/80 sm:flex-none"
-                >
-                  Approve
-                </button>
+                {isPendingReview ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={onReject}
+                      className="h-10 flex-1 rounded-xl border border-rose-200/90 bg-rose-50 px-3 text-xs font-semibold text-rose-900 transition hover:bg-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/80 sm:flex-none"
+                    >
+                      Reject
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onApprove}
+                      className="h-10 flex-1 rounded-xl bg-emerald-600 px-3 text-xs font-semibold text-white shadow-md shadow-emerald-900/10 transition hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/80 sm:flex-none"
+                    >
+                      Approve claim
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={onReopen}
+                    className="h-10 flex-1 rounded-xl border border-zinc-300/90 bg-zinc-100 px-3 text-xs font-semibold text-zinc-800 transition hover:bg-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 sm:flex-none"
+                  >
+                    Return to pending review
+                  </button>
+                )}
               </div>
             </div>
           )}
