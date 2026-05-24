@@ -7,7 +7,9 @@ import {
   FileCheck2,
   FileSearch,
   FileText,
+  Gavel,
   Inbox,
+  Landmark,
   LayoutDashboard,
   LogOut,
   MapPinned,
@@ -66,7 +68,14 @@ const queueHighlights = [
   },
 ];
 
-const STATUS_OPTIONS = ['All', 'Pending Review', 'Approved', 'Rejected'];
+const CLAIM_STATUSES = ['Pending Review', 'Approved', 'Rejected', 'Litigation', 'Recovery'];
+const STATUS_OPTIONS = ['All', ...CLAIM_STATUSES];
+
+function statusFilterLabel(option) {
+  if (option === 'All') return 'All';
+  if (option === 'Pending Review') return 'Pending';
+  return option;
+}
 
 const PAYMENT_STATUS_OPTIONS = [
   { id: 'pending', label: 'Pending' },
@@ -84,7 +93,7 @@ const MODAL_TABS = [
   { id: 'records', label: 'Vehicle & incident' },
   { id: 'parties', label: 'Parties & witnesses' },
   { id: 'quotes', label: 'Insurance quote' },
-  { id: 'payments', label: 'Supplier' },
+  { id: 'payments', label: 'Purchase' },
 ];
 
 function newQuoteLine() {
@@ -219,15 +228,72 @@ function newPartLine() {
     typeof crypto !== 'undefined' && crypto.randomUUID
       ? crypto.randomUUID()
       : `part-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  return { id, company: '', amount: 0, status: 'pending', notes: '' };
+  return {
+    id,
+    company: '',
+    partName: '',
+    amount: '',
+    orderDate: '',
+    tentativeReceivedDate: '',
+    receivedBy: '',
+    invoices: [],
+    status: 'pending',
+    notes: '',
+  };
+}
+
+function newPartInvoiceId() {
+  return typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `inv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizePartInvoicesFromRow(p) {
+  if (Array.isArray(p?.invoices) && p.invoices.length > 0) {
+    return p.invoices.map((inv) => ({
+      id: String(inv.id || newPartInvoiceId()),
+      invoiceNumber: String(inv.invoiceNumber ?? ''),
+      fileId: inv.fileId ?? null,
+      fileName: String(inv.fileName ?? ''),
+      fileUrl: String(inv.fileUrl ?? ''),
+    }));
+  }
+  if (p?.invoiceFileId || p?.invoiceNumber || p?.invoiceFileName) {
+    return [
+      {
+        id: newPartInvoiceId(),
+        invoiceNumber: String(p.invoiceNumber ?? ''),
+        fileId: p.invoiceFileId ?? null,
+        fileName: String(p.invoiceFileName ?? ''),
+        fileUrl: String(p.invoiceFileUrl ?? ''),
+      },
+    ];
+  }
+  return [];
+}
+
+function normalizePartRow(p) {
+  return {
+    ...p,
+    invoices: normalizePartInvoicesFromRow(p),
+  };
 }
 
 function cloneParts(parts) {
-  return (parts ?? []).map((p) => ({ ...p }));
+  return (parts ?? []).map((p) => normalizePartRow(p));
 }
 
 function cloneQuoteOptions(options) {
   return (options ?? []).map((q) => ({ ...q }));
+}
+
+function partAmountInputValue(amount) {
+  if (amount === '' || amount == null) return '';
+  return String(amount);
+}
+
+function partAmountNumber(amount) {
+  return parseMoneyInput(amount === '' || amount == null ? '' : String(amount)) ?? 0;
 }
 
 function partsSnapshot(parts) {
@@ -235,11 +301,291 @@ function partsSnapshot(parts) {
     .map((p) => ({
       id: String(p.id || ''),
       company: String(p.company ?? ''),
-      amount: Number(p.amount) || 0,
+      partName: String(p.partName ?? ''),
+      amount: partAmountNumber(p.amount),
+      orderDate: String(p.orderDate ?? ''),
+      tentativeReceivedDate: String(p.tentativeReceivedDate ?? ''),
+      receivedBy: String(p.receivedBy ?? ''),
+      invoices: normalizePartInvoicesFromRow(p).map((inv) => ({
+        id: String(inv.id),
+        invoiceNumber: String(inv.invoiceNumber ?? ''),
+        fileId: inv.fileId == null ? null : String(inv.fileId),
+        fileName: String(inv.fileName ?? ''),
+        fileUrl: String(inv.fileUrl ?? ''),
+      })),
       status: String(p.status || 'pending').toLowerCase() === 'completed' ? 'completed' : 'pending',
       notes: String(p.notes ?? ''),
     }))
     .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function PurchaseField({ label, children, className = '' }) {
+  return (
+    <div className={className}>
+      <span className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">{label}</span>
+      <div className="mt-1">{children}</div>
+    </div>
+  );
+}
+
+const purchaseInputClass =
+  'h-9 w-full rounded-lg border border-zinc-200 bg-white px-2 text-sm text-zinc-900 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-500/20';
+
+function ConfirmDialog({
+  open,
+  title,
+  description,
+  confirmLabel = 'Confirm',
+  cancelLabel = 'Cancel',
+  variant = 'default',
+  busy = false,
+  onConfirm,
+  onCancel,
+}) {
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (e) => {
+      if (e.key === 'Escape' && !busy) onCancel();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, busy, onCancel]);
+
+  if (!open) return null;
+
+  const confirmClass =
+    variant === 'danger'
+      ? 'bg-rose-600 text-white hover:bg-rose-700 focus-visible:ring-rose-500/80'
+      : 'bg-indigo-600 text-white hover:bg-indigo-700 focus-visible:ring-indigo-500/80';
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-zinc-950/55 p-4 backdrop-blur-sm"
+      role="presentation"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget && !busy) onCancel();
+      }}
+    >
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="confirm-dialog-title"
+        aria-describedby="confirm-dialog-desc"
+        className="w-full max-w-md rounded-2xl border border-zinc-200/90 bg-white p-5 shadow-sheet-lg"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <h3 id="confirm-dialog-title" className="font-display text-base font-semibold text-zinc-950">
+          {title}
+        </h3>
+        <p id="confirm-dialog-desc" className="mt-2 text-sm leading-relaxed text-zinc-600">
+          {description}
+        </p>
+        <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onCancel}
+            className="inline-flex h-9 items-center justify-center rounded-lg border border-zinc-200 bg-white px-4 text-2xs font-semibold text-zinc-800 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {cancelLabel}
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onConfirm}
+            className={`inline-flex h-9 items-center justify-center rounded-lg px-4 text-2xs font-semibold shadow-sm transition focus-visible:outline-none focus-visible:ring-2 disabled:cursor-not-allowed disabled:opacity-60 ${confirmClass}`}
+          >
+            {busy ? 'Removing…' : confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PurchaseInvoicesSection({
+  part,
+  isModerator,
+  partNextInvoiceNumber,
+  onNextInvoiceNumberChange,
+  partInvoiceBusyId,
+  onUpload,
+  onInvoiceNumberChange,
+  onRemoveInvoice,
+}) {
+  const invoices = part.invoices ?? [];
+  const busy = partInvoiceBusyId === part.id;
+  const [invoiceToDelete, setInvoiceToDelete] = useState(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+
+  const requestRemoveInvoice = (inv) => setInvoiceToDelete(inv);
+
+  const confirmRemoveInvoice = async () => {
+    if (!invoiceToDelete || deleteBusy) return;
+    setDeleteBusy(true);
+    try {
+      await onRemoveInvoice(invoiceToDelete.id);
+      setInvoiceToDelete(null);
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
+
+  if (isModerator) {
+    if (invoices.length === 0) return <p className="text-sm text-zinc-500">No invoices</p>;
+    return (
+      <ul className="divide-y divide-zinc-100 rounded-lg border border-zinc-200/90 bg-white">
+        {invoices.map((inv) => (
+          <li key={inv.id} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5 text-sm">
+            <span className="font-mono font-medium text-zinc-900">{inv.invoiceNumber || '—'}</span>
+            {inv.fileUrl ? (
+              <a
+                href={resolveClaimFileHref(inv.fileUrl)}
+                target="_blank"
+                rel="noreferrer"
+                className="text-2xs font-semibold text-indigo-700 hover:underline"
+              >
+                {inv.fileName || 'View PDF'}
+              </a>
+            ) : (
+              <span className="text-2xs text-zinc-500">{inv.fileName || '—'}</span>
+            )}
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
+  const deleteLabel = invoiceToDelete?.invoiceNumber?.trim() || invoiceToDelete?.fileName || 'this invoice';
+
+  return (
+    <>
+    <ConfirmDialog
+      open={Boolean(invoiceToDelete)}
+      title="Remove invoice?"
+      description={
+        <>
+          This will remove <span className="font-medium text-zinc-900">{deleteLabel}</span> from this purchase
+          line and delete the uploaded PDF from the case. This cannot be undone until you upload it again.
+        </>
+      }
+      confirmLabel="Remove invoice"
+      cancelLabel="Keep invoice"
+      variant="danger"
+      busy={deleteBusy}
+      onCancel={() => {
+        if (!deleteBusy) setInvoiceToDelete(null);
+      }}
+      onConfirm={confirmRemoveInvoice}
+    />
+    <div className="mt-4 overflow-hidden rounded-xl border border-zinc-200/90 bg-white">
+      <div className="border-b border-zinc-100 bg-zinc-50/90 px-4 py-3">
+        <h4 className="text-xs font-semibold text-zinc-900">Invoices</h4>
+        <p className="mt-0.5 text-2xs leading-relaxed text-zinc-600">
+          Add each invoice number with its PDF. You can attach multiple invoices to this purchase line.
+        </p>
+      </div>
+      <div className="space-y-4 p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+          <div className="w-full sm:max-w-[220px]">
+            <label htmlFor={`next-inv-num-${part.id}`} className="text-2xs font-medium text-zinc-700">
+              Invoice number
+            </label>
+            <input
+              id={`next-inv-num-${part.id}`}
+              type="text"
+              value={partNextInvoiceNumber ?? ''}
+              onChange={(e) => onNextInvoiceNumberChange(e.target.value)}
+              placeholder="e.g. INV-1042"
+              className={`${purchaseInputClass} mt-1`}
+            />
+          </div>
+          <label
+            className={`inline-flex h-9 shrink-0 cursor-pointer items-center justify-center gap-2 rounded-lg px-4 text-xs font-semibold shadow-sm transition ${
+              busy
+                ? 'cursor-wait border border-zinc-200 bg-zinc-100 text-zinc-500'
+                : 'border border-indigo-600 bg-indigo-600 text-white hover:bg-indigo-700'
+            }`}
+          >
+            <Upload className="h-4 w-4" strokeWidth={2} />
+            {busy ? 'Uploading…' : 'Upload PDF'}
+            <input
+              type="file"
+              accept="application/pdf,.pdf"
+              className="sr-only"
+              disabled={busy}
+              onChange={onUpload}
+            />
+          </label>
+        </div>
+
+        {invoices.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-zinc-200 bg-zinc-50/50 px-4 py-6 text-center text-xs text-zinc-500">
+            No invoices yet — enter a number above and upload a PDF.
+          </p>
+        ) : (
+          <div className="overflow-x-auto scrollbar-thin">
+            <table className="w-full min-w-[480px] border-collapse text-left text-[13px]">
+              <thead>
+                <tr className="border-b border-zinc-200 text-2xs font-semibold uppercase tracking-wider text-zinc-500">
+                  <th className="w-[140px] px-3 py-2">Invoice #</th>
+                  <th className="px-3 py-2">Document</th>
+                  <th className="w-[120px] px-3 py-2 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-100">
+                {invoices.map((inv) => (
+                  <tr key={inv.id} className="bg-white hover:bg-zinc-50/50">
+                    <td className="px-3 py-2 align-middle">
+                      <input
+                        type="text"
+                        value={inv.invoiceNumber ?? ''}
+                        onChange={(e) => onInvoiceNumberChange(inv.id, e.target.value)}
+                        placeholder="Invoice #"
+                        aria-label={`Invoice number for ${inv.fileName || 'document'}`}
+                        className="h-9 w-full max-w-[200px] rounded-lg border border-zinc-200 px-2.5 font-mono text-sm outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-500/20"
+                      />
+                    </td>
+                    <td className="px-3 py-2 align-middle">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <FileText className="h-4 w-4 shrink-0 text-rose-600" strokeWidth={2} />
+                        <span className="truncate text-sm text-zinc-700" title={inv.fileName}>
+                          {inv.fileName || 'PDF document'}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 align-middle text-right">
+                      <div className="inline-flex items-center justify-end gap-1.5">
+                        {inv.fileUrl ? (
+                          <a
+                            href={resolveClaimFileHref(inv.fileUrl)}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex h-8 items-center rounded-lg border border-zinc-200 bg-white px-2.5 text-2xs font-semibold text-zinc-800 hover:bg-zinc-50"
+                          >
+                            Open
+                          </a>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() => requestRemoveInvoice(inv)}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-rose-200/90 text-rose-700 hover:bg-rose-50"
+                          aria-label="Remove invoice"
+                        >
+                          <Trash2 className="h-4 w-4" strokeWidth={2} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+    </>
+  );
 }
 
 function partsEqual(a, b) {
@@ -646,7 +992,9 @@ function App() {
     const pending = claims.filter((item) => item.status === 'Pending Review').length;
     const approved = claims.filter((item) => item.status === 'Approved').length;
     const rejected = claims.filter((item) => item.status === 'Rejected').length;
-    return { total: claims.length, pending, approved, rejected };
+    const litigation = claims.filter((item) => item.status === 'Litigation').length;
+    const recovery = claims.filter((item) => item.status === 'Recovery').length;
+    return { total: claims.length, pending, approved, rejected, litigation, recovery };
   }, [claims]);
 
   const filteredClaims = claims;
@@ -662,6 +1010,8 @@ function App() {
       return;
     }
     const sameClaim = (item) => claimMongoId(item) === claimId;
+    const previousClaims = claims;
+    const previousSelected = selectedClaim;
     setClaims((current) => current.map((item) => (sameClaim(item) ? { ...item, status } : item)));
     setSelectedClaim((current) => (current && sameClaim(current) ? { ...current, status } : current));
     if (!session.token || session.role !== 'admin') return;
@@ -670,7 +1020,11 @@ function App() {
       applyClaimFromServer(updated);
     } catch (e) {
       console.error(e);
-      window.alert(`Could not update status on server: ${e.message || String(e)}`);
+      setClaims(previousClaims);
+      setSelectedClaim(previousSelected);
+      window.alert(
+        `Could not update status on server: ${e.message || String(e)}. If you use Litigation or Recovery, redeploy the backend on Render (or run the latest API locally).`,
+      );
     }
   };
 
@@ -730,13 +1084,28 @@ function App() {
     const noteHtml = escapeHtml(item.adminNote || '').replace(/\n/g, '<br/>') || '—';
     const parts = item.parts ?? [];
     const partsHtml = parts.length
-      ? `<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr><th align="left" style="padding:6px 0;border-bottom:1px solid #cbd5e1;">Company</th><th align="right" style="padding:6px 0;border-bottom:1px solid #cbd5e1;">Amount</th><th align="left" style="padding:6px 0;border-bottom:1px solid #cbd5e1;">Notes</th><th align="left" style="padding:6px 0;border-bottom:1px solid #cbd5e1;">Status</th></tr></thead><tbody>${parts
+      ? `<table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr>
+          <th align="left">Supplier</th><th align="left">Part</th><th align="right">Amount</th>
+          <th align="left">Order</th><th align="left">Tentative recv.</th><th align="left">Received by</th>
+          <th align="left">Invoice #</th><th align="left">Status</th>
+        </tr></thead><tbody>${parts
           .map(
             (p) =>
-              `<tr><td style="padding:6px 0;border-bottom:1px solid #e2e8f0;">${escapeHtml(p.company || '—')}</td><td style="padding:6px 0;border-bottom:1px solid #e2e8f0;text-align:right;">${formatAud(p.amount)}</td><td style="padding:6px 0;border-bottom:1px solid #e2e8f0;">${escapeHtml(p.notes || '—').replace(/\n/g, '<br/>')}</td><td style="padding:6px 0;border-bottom:1px solid #e2e8f0;">${escapeHtml(p.status)}</td></tr>`,
+              `<tr>
+                <td>${escapeHtml(p.company || '—')}</td>
+                <td>${escapeHtml(p.partName || '—')}</td>
+                <td align="right">${formatAud(p.amount)}</td>
+                <td>${escapeHtml(p.orderDate || '—')}</td>
+                <td>${escapeHtml(p.tentativeReceivedDate || '—')}</td>
+                <td>${escapeHtml(p.receivedBy || '—')}</td>
+                <td>${(p.invoices?.length
+                  ? p.invoices.map((inv) => escapeHtml(inv.invoiceNumber || '—')).join('<br/>')
+                  : escapeHtml(p.invoiceNumber || '—'))}</td>
+                <td>${escapeHtml(p.status)}</td>
+              </tr>`,
           )
           .join('')}</tbody></table>`
-      : '<p>No part lines recorded.</p>';
+      : '<p>No purchase lines recorded.</p>';
     const damageMarkerCount = data.damage?.points
       ? Object.values(data.damage.points).reduce((count, list) => count + list.length, 0)
       : 0;
@@ -972,7 +1341,7 @@ function App() {
                 </p>
               </div>
             )}
-            <section className="mb-6 grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
+            <section className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6 sm:gap-4">
               <MetricCard
                 title="Total claims"
                 value={metrics.total}
@@ -1001,6 +1370,20 @@ function App() {
                 icon={XCircle}
                 tone="rose"
               />
+              <MetricCard
+                title="Litigation"
+                value={metrics.litigation}
+                caption={t ? `${shareOfTotal(metrics.litigation, t)}% of portfolio` : '—'}
+                icon={Gavel}
+                tone="violet"
+              />
+              <MetricCard
+                title="Recovery"
+                value={metrics.recovery}
+                caption={t ? `${shareOfTotal(metrics.recovery, t)}% of portfolio` : '—'}
+                icon={Landmark}
+                tone="sky"
+              />
             </section>
 
             <section className="mt-2 grid gap-6 xl:grid-cols-[1fr_300px]">
@@ -1027,7 +1410,7 @@ function App() {
                         />
                       </label>
                       <div
-                        className="inline-flex shrink-0 rounded-xl border border-zinc-200/90 bg-zinc-100/90 p-0.5 shadow-inner"
+                        className="flex max-w-full flex-wrap gap-1 rounded-xl border border-zinc-200/90 bg-zinc-100/90 p-0.5 shadow-inner"
                         role="group"
                         aria-label="Filter by status"
                       >
@@ -1036,13 +1419,13 @@ function App() {
                             key={option}
                             type="button"
                             onClick={() => setStatusFilter(option)}
-                            className={`whitespace-nowrap rounded-lg px-3 py-2 text-2xs font-semibold uppercase tracking-wide transition ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-1 ${
+                            className={`whitespace-nowrap rounded-lg px-2.5 py-2 text-2xs font-semibold uppercase tracking-wide transition ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-1 sm:px-3 ${
                               statusFilter === option
                                 ? 'bg-white text-zinc-900 shadow-lift ring-1 ring-zinc-200/80'
                                 : 'text-zinc-600 hover:text-zinc-900'
                             }`}
                           >
-                            {option === 'All' ? 'All' : option === 'Pending Review' ? 'Pending' : option}
+                            {statusFilterLabel(option)}
                           </button>
                         ))}
                       </div>
@@ -1258,6 +1641,8 @@ function App() {
           onClose={closeClaimModal}
           onApprove={() => updateClaimStatus(claimMongoId(selectedClaim), 'Approved')}
           onReject={() => updateClaimStatus(claimMongoId(selectedClaim), 'Rejected')}
+          onLitigation={() => updateClaimStatus(claimMongoId(selectedClaim), 'Litigation')}
+          onRecovery={() => updateClaimStatus(claimMongoId(selectedClaim), 'Recovery')}
           onReopen={() => updateClaimStatus(claimMongoId(selectedClaim), 'Pending Review')}
           onExport={() => exportClaimToPdf(selectedClaim)}
           onPatchClaim={patchClaim}
@@ -1278,6 +1663,8 @@ function MetricCard({ title, value, caption, icon: Icon, tone }) {
     amber: 'border-amber-200/80 bg-amber-50/50 text-amber-900',
     emerald: 'border-emerald-200/80 bg-emerald-50/50 text-emerald-900',
     rose: 'border-rose-200/80 bg-rose-50/50 text-rose-900',
+    violet: 'border-violet-200/80 bg-violet-50/50 text-violet-900',
+    sky: 'border-sky-200/80 bg-sky-50/50 text-sky-900',
   };
 
   return (
@@ -1304,13 +1691,17 @@ function StatusBadge({ status }) {
       ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
       : status === 'Rejected'
         ? 'border-rose-200 bg-rose-50 text-rose-900'
-        : 'border-amber-200 bg-amber-50 text-amber-950';
+        : status === 'Litigation'
+          ? 'border-violet-200 bg-violet-50 text-violet-900'
+          : status === 'Recovery'
+            ? 'border-sky-200 bg-sky-50 text-sky-900'
+            : 'border-amber-200 bg-amber-50 text-amber-950';
 
   return (
     <span
       className={`inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide ${styles}`}
     >
-      {status === 'Pending Review' ? 'Pending' : status}
+      {statusFilterLabel(status)}
     </span>
   );
 }
@@ -1437,6 +1828,8 @@ function ClaimModal({
   onClose,
   onApprove,
   onReject,
+  onLitigation,
+  onRecovery,
   onReopen,
   onExport,
   onPatchClaim,
@@ -1459,6 +1852,8 @@ function ClaimModal({
   const [partsDraft, setPartsDraft] = useState(() => cloneParts(claimItem.parts));
   const [partsSave, setPartsSave] = useState('idle');
   const [partsSaveKind, setPartsSaveKind] = useState(null);
+  const [partInvoiceBusyId, setPartInvoiceBusyId] = useState(null);
+  const [partNextInvoiceNumber, setPartNextInvoiceNumber] = useState({});
   const [quoteOptionsDraft, setQuoteOptionsDraft] = useState(() => cloneQuoteOptions(claimItem.quoteOptions));
   const [primaryQuoteIdDraft, setPrimaryQuoteIdDraft] = useState(claimItem.primaryQuoteId ?? null);
   const [finalQuoteIdDraft, setFinalQuoteIdDraft] = useState(claimItem.finalQuoteId ?? null);
@@ -1633,7 +2028,11 @@ function ClaimModal({
     setPartsDraft((rows) =>
       rows.map((p) => {
         if (p.id !== partId) return p;
-        if (field === 'amount') return { ...p, amount: Number(String(raw).replace(/,/g, '')) || 0 };
+        if (field === 'amount') {
+          const s = String(raw).replace(/,/g, '');
+          if (s === '' || /^\d*\.?\d*$/.test(s)) return { ...p, amount: s };
+          return p;
+        }
         return { ...p, [field]: raw };
       }),
     );
@@ -1651,6 +2050,85 @@ function ClaimModal({
     setPartsDraft((rows) => rows.filter((p) => p.id !== partId));
     if (partsSave === 'saved') setPartsSave('idle');
     setPartsSaveKind(null);
+  };
+
+  const updatePartInvoiceNumber = (partId, invoiceId, invoiceNumber) => {
+    setPartsDraft((rows) =>
+      rows.map((p) =>
+        p.id === partId
+          ? {
+              ...p,
+              invoices: (p.invoices ?? []).map((inv) =>
+                inv.id === invoiceId ? { ...inv, invoiceNumber } : inv,
+              ),
+            }
+          : p,
+      ),
+    );
+    if (partsSave === 'saved') setPartsSave('idle');
+    setPartsSaveKind(null);
+  };
+
+  const removePartInvoice = async (partId, invoiceId) => {
+    if (isModerator) return;
+    const part = partsDraft.find((p) => p.id === partId);
+    const inv = (part?.invoices ?? []).find((row) => row.id === invoiceId);
+    if (!inv) return;
+    if (authToken && inv.fileId) {
+      try {
+        const caseFiles = await api.deleteClaimPdf(authToken, claimMongoId(claimItem), inv.fileId);
+        patch((prev) => ({ ...prev, caseFiles }));
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    setPartsDraft((rows) =>
+      rows.map((p) =>
+        p.id === partId ? { ...p, invoices: (p.invoices ?? []).filter((row) => row.id !== invoiceId) } : p,
+      ),
+    );
+    if (partsSave === 'saved') setPartsSave('idle');
+    setPartsSaveKind(null);
+  };
+
+  const handlePartInvoiceUpload = async (partId, ev) => {
+    const file = ev.target.files?.[0];
+    ev.target.value = '';
+    if (!file || isModerator || !authToken) return;
+    if (file.type !== 'application/pdf' && !/\.pdf$/i.test(file.name)) {
+      window.alert('Please upload a PDF invoice.');
+      return;
+    }
+    const claimId = claimMongoId(claimItem);
+    if (!claimId) {
+      window.alert('Invalid claim id — close and reopen this case.');
+      return;
+    }
+    const invoiceNumber = String(partNextInvoiceNumber[partId] ?? '').trim();
+    setPartInvoiceBusyId(partId);
+    try {
+      const caseFiles = await api.uploadClaimPdf(authToken, claimId, file);
+      const uploaded = caseFiles[caseFiles.length - 1];
+      if (!uploaded) throw new Error('Upload failed');
+      const newRow = {
+        id: newPartInvoiceId(),
+        invoiceNumber,
+        fileId: uploaded.id,
+        fileName: uploaded.name,
+        fileUrl: uploaded.url,
+      };
+      setPartsDraft((rows) =>
+        rows.map((p) => (p.id === partId ? { ...p, invoices: [...(p.invoices ?? []), newRow] } : p)),
+      );
+      setPartNextInvoiceNumber((prev) => ({ ...prev, [partId]: '' }));
+      patch((prev) => ({ ...prev, caseFiles }));
+      if (partsSave === 'saved') setPartsSave('idle');
+      setPartsSaveKind(null);
+    } catch (e) {
+      window.alert(e?.message ? String(e.message) : 'Could not upload invoice.');
+    } finally {
+      setPartInvoiceBusyId(null);
+    }
   };
 
   const addQuote = () => {
@@ -1672,7 +2150,7 @@ function ClaimModal({
       setPartsSave('saved');
     } catch (e) {
       setPartsSave('error');
-      window.alert(e?.message ? String(e.message) : 'Could not save supplier lines.');
+      window.alert(e?.message ? String(e.message) : 'Could not save purchase lines.');
     }
   };
 
@@ -1916,12 +2394,12 @@ function ClaimModal({
                           : undefined
                       }
                     />
-                    <SummaryItem label="Parts" value={partsSummaryText} />
+                    <SummaryItem label="Purchase" value={partsSummaryText} />
                   </dl>
                   {!isModerator && (
                     <div className="mt-4 rounded-xl border border-indigo-200/90 bg-indigo-50/70 p-3.5">
                       <p className="text-xs leading-relaxed text-indigo-950">
-                        Changes save to Horizon API (insurance quote, supplier parts, notes). Upload PDFs on the insurance quote tab.
+                        Changes save to Horizon API (insurance quote, purchase lines, notes). Upload PDFs on the insurance quote tab.
                       </p>
                       <button
                         type="button"
@@ -2092,7 +2570,7 @@ function ClaimModal({
                   <h3 className="text-[13px] font-semibold text-zinc-900">Pricing</h3>
                   <p className="mt-1 text-2xs leading-relaxed text-zinc-600 sm:text-xs">
                     <span className="font-medium text-zinc-800">Quote price</span> is set by your repair shop.{' '}
-                    <span className="font-medium text-zinc-800">Insurance company price</span> is decided by the insurer — enter it when you receive their approval.
+                    <span className="font-medium text-zinc-800">Authorized amount</span> is the insurer-approved figure — enter it when you receive approval.
                   </p>
                   {memberRepairQuoteRef ? (
                     <p className="mt-2 text-2xs text-zinc-600">
@@ -2168,7 +2646,7 @@ function ClaimModal({
                       >
                         Insurance company price
                       </label>
-                      <p className="mt-0.5 text-2xs text-zinc-500">Decided by the insurer</p>
+                      <p className="mt-0.5 text-2xs text-zinc-500">Authorized amount</p>
                       {!isModerator ? (
                         <>
                           <input
@@ -2187,7 +2665,7 @@ function ClaimModal({
                           />
                           <p className="mt-1 font-mono text-2xs text-zinc-500">
                             {insuranceApprovedPrice != null
-                              ? `Insurance company price: ${formatAud(insuranceApprovedPrice)}`
+                              ? `Authorized amount: ${formatAud(insuranceApprovedPrice)}`
                               : priceDraft.insurance !== ''
                                 ? formatAud(parseMoneyInput(priceDraft.insurance) ?? 0)
                                 : 'Not set'}
@@ -2543,9 +3021,9 @@ function ClaimModal({
                         <Package className="h-5 w-5" strokeWidth={2} />
                       </span>
                       <div>
-                        <h3 className="text-[13px] font-semibold text-zinc-900">Supplier</h3>
+                        <h3 className="text-[13px] font-semibold text-zinc-900">Purchase</h3>
                         <p className="mt-1 text-2xs leading-relaxed text-zinc-600 sm:text-xs">
-                          Supplier or part company, line amount (AUD), optional notes, and line status (pending or completed).
+                          Supplier, part details, dates, invoice upload (PDF), and line status. Save purchase lines when finished.
                         </p>
                       </div>
                     </div>
@@ -2567,102 +3045,143 @@ function ClaimModal({
                       {!isModerator && ' Use Add part line to create a row.'}
                     </p>
                   ) : (
-                    <div className="mt-4 overflow-x-auto scrollbar-thin">
-                      <table className="min-w-[640px] w-full border-collapse text-left text-[13px]">
-                        <thead>
-                          <tr className="border-b border-zinc-200 bg-zinc-50/95">
-                            <th className="px-2 py-2 text-2xs font-semibold uppercase tracking-wider text-zinc-500">
-                              Company
-                            </th>
-                            <th className="px-2 py-2 text-2xs font-semibold uppercase tracking-wider text-zinc-500">
-                              Amount (AUD)
-                            </th>
-                            <th className="px-2 py-2 text-2xs font-semibold uppercase tracking-wider text-zinc-500">
-                              Notes
-                            </th>
-                            <th className="px-2 py-2 text-2xs font-semibold uppercase tracking-wider text-zinc-500">
-                              Status
-                            </th>
-                            {!isModerator && <th className="w-10 px-2 py-2" aria-hidden />}
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-zinc-100">
-                          {parts.map((p) => (
-                            <tr key={p.id}>
-                              <td className="px-2 py-2 align-top">
-                                {!isModerator ? (
-                                  <input
-                                    type="text"
-                                    value={p.company}
-                                    onChange={(e) => updatePartDraft(p.id, 'company', e.target.value)}
-                                    className="h-9 w-full min-w-[140px] rounded-lg border border-zinc-200 bg-white px-2 text-sm outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-500/20"
-                                    placeholder="Supplier name"
-                                  />
-                                ) : (
-                                  <span className="text-sm text-zinc-900">{p.company || '—'}</span>
-                                )}
-                              </td>
-                              <td className="px-2 py-2 align-top">
-                                {!isModerator ? (
-                                  <input
-                                    type="number"
-                                    min={0}
-                                    step={1}
-                                    value={Number.isFinite(p.amount) ? p.amount : 0}
-                                    onChange={(e) => updatePartDraft(p.id, 'amount', e.target.value)}
-                                    className="h-9 w-full max-w-[140px] rounded-lg border border-zinc-200 bg-white px-2 font-mono text-sm outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-500/20"
-                                  />
-                                ) : (
-                                  <span className="font-mono text-sm text-zinc-900">{formatAud(p.amount)}</span>
-                                )}
-                              </td>
-                              <td className="px-2 py-2 align-top">
-                                {!isModerator ? (
-                                  <input
-                                    type="text"
-                                    value={p.notes ?? ''}
-                                    onChange={(e) => updatePartDraft(p.id, 'notes', e.target.value)}
-                                    aria-label="Part notes"
-                                    className="h-9 w-full min-w-[160px] rounded-lg border border-zinc-200 bg-white px-2 text-sm outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-500/20"
-                                    placeholder="Notes"
-                                  />
-                                ) : (
-                                  <span className="text-sm text-zinc-700">{p.notes?.trim() ? p.notes : '—'}</span>
-                                )}
-                              </td>
-                              <td className="px-2 py-2 align-top">
-                                {!isModerator ? (
-                                  <select
-                                    value={p.status === 'completed' ? 'completed' : 'pending'}
-                                    onChange={(e) => updatePartDraft(p.id, 'status', e.target.value)}
-                                    className="h-9 rounded-lg border border-zinc-200 bg-white px-2 text-sm font-medium outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-500/20"
-                                  >
-                                    {PART_STATUS_OPTIONS.map((opt) => (
-                                      <option key={opt.id} value={opt.id}>
-                                        {opt.label}
-                                      </option>
-                                    ))}
-                                  </select>
-                                ) : (
-                                  <PartStatusBadge status={p.status} />
-                                )}
-                              </td>
-                              {!isModerator && (
-                                <td className="px-2 py-2 align-top">
-                                  <button
-                                    type="button"
-                                    onClick={() => removePart(p.id)}
-                                    className="rounded-lg border border-rose-200/90 p-1.5 text-rose-700 hover:bg-rose-50"
-                                    aria-label="Remove part line"
-                                  >
-                                    <Trash2 className="h-4 w-4" strokeWidth={2} />
-                                  </button>
-                                </td>
+                    <div className="mt-4 space-y-4">
+                      {parts.map((p, index) => (
+                        <div
+                          key={p.id}
+                          className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-sm"
+                        >
+                          <div className="mb-3 flex items-center justify-between gap-2">
+                            <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">
+                              Purchase line {index + 1}
+                            </p>
+                            {!isModerator && (
+                              <button
+                                type="button"
+                                onClick={() => removePart(p.id)}
+                                className="rounded-lg border border-rose-200/90 p-1.5 text-rose-700 hover:bg-rose-50"
+                                aria-label="Remove purchase line"
+                              >
+                                <Trash2 className="h-4 w-4" strokeWidth={2} />
+                              </button>
+                            )}
+                          </div>
+                          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                            <PurchaseField label="Supplier name">
+                              {!isModerator ? (
+                                <input
+                                  type="text"
+                                  value={p.company}
+                                  onChange={(e) => updatePartDraft(p.id, 'company', e.target.value)}
+                                  className={purchaseInputClass}
+                                  placeholder="Supplier name"
+                                />
+                              ) : (
+                                <span className="text-sm text-zinc-900">{p.company || '—'}</span>
                               )}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                            </PurchaseField>
+                            <PurchaseField label="Parts name">
+                              {!isModerator ? (
+                                <input
+                                  type="text"
+                                  value={p.partName ?? ''}
+                                  onChange={(e) => updatePartDraft(p.id, 'partName', e.target.value)}
+                                  className={purchaseInputClass}
+                                  placeholder="Parts name"
+                                />
+                              ) : (
+                                <span className="text-sm text-zinc-900">{p.partName || '—'}</span>
+                              )}
+                            </PurchaseField>
+                            <PurchaseField label="Amount (AUD)">
+                              {!isModerator ? (
+                                <input
+                                  type="text"
+                                  inputMode="decimal"
+                                  value={partAmountInputValue(p.amount)}
+                                  onChange={(e) => updatePartDraft(p.id, 'amount', e.target.value)}
+                                  placeholder="0.00"
+                                  className={`${purchaseInputClass} font-mono`}
+                                />
+                              ) : (
+                                <span className="font-mono text-sm text-zinc-900">
+                                  {formatAud(partAmountNumber(p.amount))}
+                                </span>
+                              )}
+                            </PurchaseField>
+                            <PurchaseField label="Order date">
+                              {!isModerator ? (
+                                <input
+                                  type="date"
+                                  value={p.orderDate ?? ''}
+                                  onChange={(e) => updatePartDraft(p.id, 'orderDate', e.target.value)}
+                                  className={purchaseInputClass}
+                                />
+                              ) : (
+                                <span className="text-sm text-zinc-900">{p.orderDate || '—'}</span>
+                              )}
+                            </PurchaseField>
+                            <PurchaseField label="Tentative received date">
+                              {!isModerator ? (
+                                <input
+                                  type="date"
+                                  value={p.tentativeReceivedDate ?? ''}
+                                  onChange={(e) =>
+                                    updatePartDraft(p.id, 'tentativeReceivedDate', e.target.value)
+                                  }
+                                  className={purchaseInputClass}
+                                />
+                              ) : (
+                                <span className="text-sm text-zinc-900">{p.tentativeReceivedDate || '—'}</span>
+                              )}
+                            </PurchaseField>
+                            <PurchaseField label="Received by">
+                              {!isModerator ? (
+                                <input
+                                  type="text"
+                                  value={p.receivedBy ?? ''}
+                                  onChange={(e) => updatePartDraft(p.id, 'receivedBy', e.target.value)}
+                                  className={purchaseInputClass}
+                                  placeholder="Name"
+                                />
+                              ) : (
+                                <span className="text-sm text-zinc-900">{p.receivedBy || '—'}</span>
+                              )}
+                            </PurchaseField>
+                            <PurchaseField label="Line status">
+                              {!isModerator ? (
+                                <select
+                                  value={p.status === 'completed' ? 'completed' : 'pending'}
+                                  onChange={(e) => updatePartDraft(p.id, 'status', e.target.value)}
+                                  className={purchaseInputClass}
+                                >
+                                  {PART_STATUS_OPTIONS.map((opt) => (
+                                    <option key={opt.id} value={opt.id}>
+                                      {opt.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <PartStatusBadge status={p.status} />
+                              )}
+                            </PurchaseField>
+                          </div>
+                          <PurchaseInvoicesSection
+                            part={p}
+                            isModerator={isModerator}
+                            partNextInvoiceNumber={partNextInvoiceNumber[p.id] ?? ''}
+                            onNextInvoiceNumberChange={(value) =>
+                              setPartNextInvoiceNumber((prev) => ({ ...prev, [p.id]: value }))
+                            }
+                            partInvoiceBusyId={partInvoiceBusyId}
+                            onUpload={(e) => handlePartInvoiceUpload(p.id, e)}
+                            onInvoiceNumberChange={(invoiceId, value) =>
+                              updatePartInvoiceNumber(p.id, invoiceId, value)
+                            }
+                            onRemoveInvoice={(invoiceId) => removePartInvoice(p.id, invoiceId)}
+                          />
+                        </div>
+                      ))}
                     </div>
                   )}
                   {!isModerator && (
@@ -2676,19 +3195,19 @@ function ClaimModal({
                         {saveUpdateLabel({
                           hasSaved: hasSavedParts,
                           busy: partsSave === 'saving',
-                          entity: 'supplier lines',
+                          entity: 'purchase lines',
                         })}
                       </button>
                       {partsSave === 'saved' && (
                         <p className="mt-1.5 text-2xs font-medium text-emerald-700">
-                          {partsSaveKind === 'updated' ? 'Supplier lines updated.' : 'Supplier lines saved.'}
+                          {partsSaveKind === 'updated' ? 'Purchase lines updated.' : 'Purchase lines saved.'}
                         </p>
                       )}
                       {partsSave === 'error' && (
                         <p className="mt-1.5 text-2xs font-medium text-rose-700">Could not save — try again.</p>
                       )}
                       {hasSavedParts && !isPartsDirty && partsSave !== 'saved' && (
-                        <p className="mt-1.5 text-2xs text-zinc-500">Supplier lines are saved. Edit a field to enable Update.</p>
+                        <p className="mt-1.5 text-2xs text-zinc-500">Purchase lines are saved. Edit a field to enable Update.</p>
                       )}
                       {isPartsDirty && partsSave !== 'saved' && (
                         <p className="mt-1.5 text-2xs text-amber-800">You have unsaved changes.</p>
@@ -2705,7 +3224,7 @@ function ClaimModal({
               <p className="text-2xs leading-relaxed text-zinc-600 sm:max-w-xl sm:text-xs">
                 This case file is read-only. You can read every tab and field shown to administrators; you cannot change
                 status, request documents, export, upload PDFs, set primary or final quotes, payment status, admin notes,
-                supplier lines, or otherwise modify the record from this role.
+                purchase lines, or otherwise modify the record from this role.
               </p>
               <button
                 type="button"
@@ -2718,7 +3237,7 @@ function ClaimModal({
           ) : (
             <div className="flex shrink-0 flex-col gap-2 border-t border-zinc-200/90 bg-white/95 px-4 py-3 shadow-[0_-8px_24px_-12px_rgba(0,0,0,0.08)] backdrop-blur-md sm:flex-row sm:items-center sm:justify-between sm:px-6">
               <p className="text-2xs text-zinc-500 sm:max-w-sm">
-                Use Save or Update on each section (insurance quote, supplier, admin note) to persist changes.
+                Use Save or Update on each section (insurance quote, purchase, admin note) to persist changes.
               </p>
               <div className="flex flex-wrap gap-2 sm:justify-end">
                 <button
@@ -2740,6 +3259,20 @@ function ClaimModal({
                     </button>
                     <button
                       type="button"
+                      onClick={onLitigation}
+                      className="h-10 flex-1 rounded-xl border border-violet-200/90 bg-violet-50 px-3 text-xs font-semibold text-violet-900 transition hover:bg-violet-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/80 sm:flex-none"
+                    >
+                      Litigation
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onRecovery}
+                      className="h-10 flex-1 rounded-xl border border-sky-200/90 bg-sky-50 px-3 text-xs font-semibold text-sky-900 transition hover:bg-sky-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/80 sm:flex-none"
+                    >
+                      Recovery
+                    </button>
+                    <button
+                      type="button"
                       onClick={onApprove}
                       className="h-10 flex-1 rounded-xl bg-emerald-600 px-3 text-xs font-semibold text-white shadow-md shadow-emerald-900/10 transition hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/80 sm:flex-none"
                     >
@@ -2747,13 +3280,33 @@ function ClaimModal({
                     </button>
                   </>
                 ) : (
-                  <button
-                    type="button"
-                    onClick={onReopen}
-                    className="h-10 flex-1 rounded-xl border border-zinc-300/90 bg-zinc-100 px-3 text-xs font-semibold text-zinc-800 transition hover:bg-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 sm:flex-none"
-                  >
-                    Return to pending review
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      onClick={onReopen}
+                      className="h-10 flex-1 rounded-xl border border-zinc-300/90 bg-zinc-100 px-3 text-xs font-semibold text-zinc-800 transition hover:bg-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 sm:flex-none"
+                    >
+                      Return to pending review
+                    </button>
+                    {claimStatus !== 'Litigation' && (
+                      <button
+                        type="button"
+                        onClick={onLitigation}
+                        className="h-10 flex-1 rounded-xl border border-violet-200/90 bg-violet-50 px-3 text-xs font-semibold text-violet-900 transition hover:bg-violet-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/80 sm:flex-none"
+                      >
+                        Litigation
+                      </button>
+                    )}
+                    {claimStatus !== 'Recovery' && (
+                      <button
+                        type="button"
+                        onClick={onRecovery}
+                        className="h-10 flex-1 rounded-xl border border-sky-200/90 bg-sky-50 px-3 text-xs font-semibold text-sky-900 transition hover:bg-sky-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/80 sm:flex-none"
+                      >
+                        Recovery
+                      </button>
+                    )}
+                  </>
                 )}
               </div>
             </div>

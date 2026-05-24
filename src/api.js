@@ -121,14 +121,66 @@ export function mapQuoteOptionsForApi(quoteOptions) {
   }));
 }
 
+function mapPartDateForApi(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
+}
+
+function mapPartInvoicesForApi(part) {
+  const rows = Array.isArray(part?.invoices) ? part.invoices : [];
+  if (rows.length > 0) {
+    return rows.slice(0, 30).map((inv) => {
+      const row = inv && typeof inv === 'object' ? inv : {};
+      const fileId = row.fileId == null || row.fileId === '' ? null : String(row.fileId).trim();
+      return {
+        id: String(row.id || '').trim() || `inv-${Date.now()}`,
+        invoiceNumber: String(row.invoiceNumber ?? '').trim(),
+        fileId,
+        fileName: String(row.fileName ?? '').trim(),
+        fileUrl: String(row.fileUrl ?? '').trim(),
+      };
+    });
+  }
+  if (part?.invoiceFileId || part?.invoiceNumber || part?.invoiceFileName) {
+    const fileId = part.invoiceFileId == null || part.invoiceFileId === '' ? null : String(part.invoiceFileId).trim();
+    return [
+      {
+        id: `inv-${Date.now()}`,
+        invoiceNumber: String(part.invoiceNumber ?? '').trim(),
+        fileId,
+        fileName: String(part.invoiceFileName ?? '').trim(),
+        fileUrl: String(part.invoiceFileUrl ?? '').trim(),
+      },
+    ];
+  }
+  return [];
+}
+
 export function mapPartsForApi(parts) {
-  return (parts || []).map((p) => ({
-    id: String(p.id || '').trim() || `part-${Date.now()}`,
-    company: String(p.company ?? '').trim(),
-    amount: typeof p.amount === 'number' && !Number.isNaN(p.amount) ? p.amount : Number(p.amount) || 0,
-    status: String(p.status || 'pending').toLowerCase() === 'completed' ? 'completed' : 'pending',
-    notes: String(p.notes ?? '').trim(),
-  }));
+  return (parts || []).map((p) => {
+    const invoices = mapPartInvoicesForApi(p);
+    const first = invoices[0];
+    const invoiceFileId = first?.fileId ?? null;
+    return {
+      id: String(p.id || '').trim() || `part-${Date.now()}`,
+      company: String(p.company ?? '').trim(),
+      partName: String(p.partName ?? '').trim(),
+      amount: typeof p.amount === 'number' && !Number.isNaN(p.amount) ? p.amount : Number(p.amount) || 0,
+      orderDate: mapPartDateForApi(p.orderDate),
+      tentativeReceivedDate: mapPartDateForApi(p.tentativeReceivedDate),
+      receivedBy: String(p.receivedBy ?? '').trim(),
+      invoices,
+      invoiceNumber: first?.invoiceNumber ?? '',
+      invoiceFileId,
+      invoiceFileName: first?.fileName ?? '',
+      invoiceFileUrl: first?.fileUrl ?? '',
+      status: String(p.status || 'pending').toLowerCase() === 'completed' ? 'completed' : 'pending',
+      notes: String(p.notes ?? '').trim(),
+    };
+  });
 }
 
 export function buildAdminPersistBody(claim) {
