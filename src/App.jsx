@@ -723,7 +723,7 @@ function LoginScreen({ onLoggedIn }) {
               <span className="absolute inset-0 bg-gradient-to-t from-black/10 to-transparent opacity-0 transition group-hover:opacity-100" aria-hidden />
             </button>
           </form>
-          <div className="mt-8 rounded-xl border border-white/5 bg-zinc-950/50 px-4 py-3">
+          {/* <div className="mt-8 rounded-xl border border-white/5 bg-zinc-950/50 px-4 py-3">
             <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Demo access</p>
             {api.apiBase() ? (
               <p className="mt-2 font-mono text-2xs leading-relaxed text-zinc-500">
@@ -740,7 +740,7 @@ function LoginScreen({ onLoggedIn }) {
                 Netlify environment variables (your deployed API over <span className="font-mono">https://</span>), redeploy, and add this Netlify URL to your API CORS list. Browsers block calling a LAN or HTTP API from this HTTPS page.
               </p>
             )}
-          </div>
+          </div> */}
         </div>
       </div>
     </div>
