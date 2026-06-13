@@ -25,8 +25,10 @@ import {
 } from 'lucide-react';
 
 import * as api from './api.js';
+import { DamageDiagramViewer } from './DamageDiagramViewer.jsx';
 import { MemberSubmissionPanel } from './MemberSubmissionPanel.jsx';
 import { buildClaimExportHtml, openClaimExportPrint } from './claimExportHtml.js';
+import { resolveDamageDiagramFromDamage } from './memberSubmissionUtils.js';
 
 /** Payment status is only `pending` or `completed`; maps legacy stored values. */
 function normalizePaymentStatus(raw) {
@@ -2097,9 +2099,10 @@ function ClaimModal({
     data.damage?.towLocation ? `Tow destination: ${data.damage.towLocation}` : null,
     data.damage?.currentVehicleLocation ? `Vehicle now at: ${data.damage.currentVehicleLocation}` : null,
   ].filter(Boolean);
-  const damageMarkerCount = data.damage?.points
-    ? Object.values(data.damage.points).reduce((count, list) => count + list.length, 0)
-    : 0;
+  const mergedDamage = { ...(data.damage || {}), ...(claimItem.payload?.damage || {}) };
+  const damageDiagramResolved = resolveDamageDiagramFromDamage(mergedDamage);
+  const damageMarkerCount = damageDiagramResolved.markers.length;
+  const damageStrokeCount = damageDiagramResolved.strokes.length;
 
   const paymentStatus = paymentStatusDraft;
   const adminNote = claimItem.adminNote ?? '';
@@ -2543,9 +2546,9 @@ function ClaimModal({
                     <OperationalPill
                       title="Damage mapping"
                       text={
-                        damageMarkerCount
-                          ? `${damageMarkerCount} damage marker(s) on the vehicle diagram.`
-                          : 'No visual damage markers were placed.'
+                        damageMarkerCount || damageStrokeCount
+                          ? `${damageMarkerCount} marker(s) and ${damageStrokeCount} drawing(s) on the vehicle diagram.`
+                          : 'No visual damage markers or drawings were placed.'
                       }
                     />
                     <OperationalPill
@@ -2610,7 +2613,14 @@ function ClaimModal({
                       <SummaryItem label="Vehicle towed" value={data.damage?.towed} />
                     </div>
                     <div className="divide-y divide-zinc-100 py-1 sm:pl-4">
-                      <SummaryItem label="Damage markers" value={damageMarkerCount ? `${damageMarkerCount} mapped` : 'None mapped'} />
+                      <SummaryItem
+                        label="Damage markings"
+                        value={
+                          damageMarkerCount || damageStrokeCount
+                            ? `${damageMarkerCount} marker(s), ${damageStrokeCount} drawing(s)`
+                            : 'None mapped'
+                        }
+                      />
                       <SummaryItem label="Current vehicle location" value={data.damage?.currentVehicleLocation} />
                     </div>
                   </dl>
@@ -2630,6 +2640,7 @@ function ClaimModal({
                     </div>
                   )}
                 </div>
+                <DamageDiagramViewer damage={mergedDamage} />
               </div>
             )}
 

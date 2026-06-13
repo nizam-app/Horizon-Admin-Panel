@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, Loader2, Plus, Trash2, Upload } from 'lucide-react';
 
+import { DamageDiagramViewer } from './DamageDiagramViewer.jsx';
 import {
   buildAllSubmissionDrafts,
   CHECKLIST_LABELS,
@@ -576,6 +577,7 @@ export function MemberSubmissionEditPanel({ claimItem, onSaveSection }) {
         </div>
         <TextArea label="Tow location" className="mt-4" value={damageDraft.towLocation} onChange={(v) => setDamageDraft((d) => ({ ...d, towLocation: v }))} />
         <TextArea label="Current vehicle location" className="mt-4" value={damageDraft.currentVehicleLocation} onChange={(v) => setDamageDraft((d) => ({ ...d, currentVehicleLocation: v }))} />
+        <DamageDiagramViewer damage={damageDraft} className="mt-5" title="Damage diagram (member markings)" />
         <div className="mt-5 grid gap-5 lg:grid-cols-2">
           <AttachmentEditor title="Scene photos" files={damageDraft.diagram?.scenePhotos} onChange={(files) => setDamageDraft((d) => ({ ...d, diagram: { ...d.diagram, scenePhotos: files } }))} />
           <AttachmentEditor title="Detail photos" files={damageDraft.diagram?.detailPhotos} onChange={(files) => setDamageDraft((d) => ({ ...d, diagram: { ...d.diagram, detailPhotos: files } }))} />

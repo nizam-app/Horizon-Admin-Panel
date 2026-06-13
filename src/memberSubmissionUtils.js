@@ -249,7 +249,7 @@ export function buildIncidentDraft(data, src) {
 
 export function buildDamageDraft(data, src) {
   const dmg = { ...(data.damage || {}), ...(src.damage || {}) };
-  const diagram = dmg.diagram || {};
+  const resolved = resolveDamageDiagramFromDamage(dmg);
   return {
     claimingDamage: normalizeYesNoValue(dmg.claimingDamage),
     towed: normalizeYesNoValue(dmg.towed),
@@ -258,12 +258,35 @@ export function buildDamageDraft(data, src) {
     distanceTowed: dmg.distanceTowed ?? '',
     currentVehicleLocation: dmg.currentVehicleLocation ?? '',
     diagram: {
-      markers: diagram.markers || [],
-      strokes: diagram.strokes || [],
-      scenePhotos: mergeAttachmentLists(diagram.scenePhotos),
-      detailPhotos: mergeAttachmentLists(diagram.detailPhotos),
+      markers: resolved.markers,
+      strokes: resolved.strokes,
+      scenePhotos: resolved.scenePhotos,
+      detailPhotos: resolved.detailPhotos,
     },
   };
+}
+
+/** Resolve markers/strokes from payload or legacy admin `data.damage.points`. */
+export function resolveDamageDiagramFromDamage(damage) {
+  const dmg = damage && typeof damage === 'object' ? damage : {};
+  const diagram = dmg.diagram && typeof dmg.diagram === 'object' ? dmg.diagram : {};
+
+  let markers = Array.isArray(diagram.markers) ? diagram.markers.filter(Boolean) : [];
+  if (!markers.length && dmg.points) {
+    if (Array.isArray(dmg.points)) markers = dmg.points.filter(Boolean);
+    else if (Array.isArray(dmg.points?.markers)) markers = dmg.points.markers.filter(Boolean);
+    else if (typeof dmg.points === 'object') {
+      markers = Object.values(dmg.points)
+        .flatMap((v) => (Array.isArray(v) ? v : []))
+        .filter(Boolean);
+    }
+  }
+
+  const strokes = Array.isArray(diagram.strokes) ? diagram.strokes.filter((s) => s?.points?.length) : [];
+  const scenePhotos = mergeAttachmentLists(diagram.scenePhotos);
+  const detailPhotos = mergeAttachmentLists(diagram.detailPhotos);
+
+  return { markers, strokes, scenePhotos, detailPhotos };
 }
 
 export function buildOtherPartiesDraft(data, src) {

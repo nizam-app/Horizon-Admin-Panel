@@ -1,5 +1,8 @@
 /** Full printable HTML export — member payload + admin workspace fields + embedded images. */
 
+import { damageDiagramExportHtml } from './DamageDiagramViewer.jsx';
+import { resolveDamageDiagramFromDamage } from './memberSubmissionUtils.js';
+
 const CHECKLIST_LABELS = {
   license: 'Driver licence',
   taxiAuthority: 'Taxi authority',
@@ -204,11 +207,9 @@ export function buildClaimExportHtml(item, meta) {
           .join('')
       : '<tr><td colspan="6">No purchase lines.</td></tr>';
 
-  const markerCount = Array.isArray(diagram.markers)
-    ? diagram.markers.length
-    : data.damage?.points
-      ? Object.values(data.damage.points).reduce((n, list) => n + (list?.length || 0), 0)
-      : 0;
+  const diagramResolved = resolveDamageDiagramFromDamage(dmg);
+  const markerCount = diagramResolved.markers.length;
+  const strokeCount = diagramResolved.strokes.length;
 
   const body = `
     <header>
@@ -308,8 +309,10 @@ export function buildClaimExportHtml(item, meta) {
         ['Distance towed', dmg.distanceTowed],
         ['Vehicle location', dmg.currentVehicleLocation],
         ['Damage markers', markerCount],
+        ['Damage drawings', strokeCount],
       ]),
     )}
+    ${damageDiagramExportHtml(dmg)}
     ${gallerySection('Damage — scene photos', scenePhotos)}
     ${gallerySection('Damage — close-up photos', detailPhotos)}
 

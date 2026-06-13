@@ -1,9 +1,11 @@
+import { DamageDiagramViewer } from './DamageDiagramViewer.jsx';
 import {
   CHECKLIST_LABELS,
   formatAttachmentNames,
   mergeAttachmentLists,
   normalizeWitnesses,
   resolveChecklistFlag,
+  resolveDamageDiagramFromDamage,
   strVal,
   submissionSource,
 } from './memberSubmissionUtils.js';
@@ -101,6 +103,7 @@ function MemberSubmissionView({ claimItem }) {
   const dr = { ...(data.driver || {}), ...(src.driver || {}) };
   const inc = { ...(data.incident || {}), ...(src.incident || {}) };
   const dmg = { ...(data.damage || {}), ...(src.damage || {}) };
+  const diagramResolved = resolveDamageDiagramFromDamage(dmg);
   const diagram = dmg.diagram || {};
   const checklist = { ...(submission.checklist || {}), ...(src.checklist || {}) };
 
@@ -229,11 +232,14 @@ function MemberSubmissionView({ claimItem }) {
           ['Tow location', dmg.towLocation],
           ['Distance towed', dmg.distanceTowed],
           ['Vehicle location', dmg.currentVehicleLocation],
-          ['Damage markers', Array.isArray(diagram.markers) ? diagram.markers.length : Object.keys(dmg.points || {}).length || 0],
+          ['Damage markers', diagramResolved.markers.length],
+          ['Damage drawings', diagramResolved.strokes.length],
           ['Scene photos', formatAttachmentNames(scenePhotos)],
           ['Detail photos', formatAttachmentNames(detailPhotos)],
         ]}
       />
+
+      <DamageDiagramViewer damage={dmg} />
 
       <AttachmentGallery title="Damage — scene photos" attachments={scenePhotos} />
       <AttachmentGallery title="Damage — close-up photos" attachments={detailPhotos} />
