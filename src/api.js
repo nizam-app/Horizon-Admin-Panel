@@ -62,6 +62,45 @@ export async function getClaim(token, id) {
   return data.claim;
 }
 
+/** Download full member-submission PDF (all fields + embedded images). */
+export async function downloadClaimExportPdf(token, id, filename = 'claim-export.pdf') {
+  const claimId = normalizeClaimId(id);
+  if (!claimId) throw new Error('Invalid claim id');
+  const res = await fetch(`${requireApiBase()}/v1/admin/claims/${encodeURIComponent(claimId)}/export-pdf`, {
+    headers: { Accept: 'application/pdf', ...authHdr(token) },
+  });
+  if (res.status === 401) throw new ApiAuthError('Session expired');
+  if (!res.ok) {
+    const data = await parseJson(res);
+    throw new Error(typeof data?.error === 'string' ? data.error : `Export failed (${res.status})`);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+/** Admin edit of member-submitted claim data (one section at a time). */
+export async function patchMemberSubmission(token, id, section, data) {
+  const claimId = normalizeClaimId(id);
+  if (!claimId) throw new Error('Invalid claim id');
+  const res = await fetch(`${requireApiBase()}/v1/admin/claims/${encodeURIComponent(claimId)}/member-submission`, {
+    method: 'PATCH',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      ...authHdr(token),
+    },
+    body: JSON.stringify({ section, data }),
+  });
+  const body = await parseJson(res);
+  await handleResponse(res, body);
+  return body.claim;
+}
+
 /** 24-char hex MongoDB ObjectId string for claim routes. */
 export function normalizeClaimId(raw) {
   if (raw == null || raw === '') return '';
@@ -104,6 +143,8 @@ export function claimFromApi(raw) {
     paymentStatus: raw.paymentStatus ?? 'pending',
     quotePrice: raw.quotePrice ?? null,
     insuranceApprovedPrice: raw.insuranceApprovedPrice ?? null,
+    updatedAt: raw.updatedAt ?? rest.updatedAt,
+    createdAt: raw.createdAt ?? rest.createdAt,
   };
 }
 
@@ -288,4 +329,17 @@ export async function deleteClaimPdf(token, claimId, fileId) {
   const data = await parseJson(res);
   await handleResponse(res, data);
   return Array.isArray(data.caseFiles) ? data.caseFiles : [];
+}
+
+/** Permanently delete a claim and all server-side files (admin only). */
+export async function deleteClaim(token, id) {
+  const claimId = normalizeClaimId(id);
+  if (!claimId) throw new Error('Invalid claim id');
+  const res = await fetch(`${requireApiBase()}/v1/admin/claims/${encodeURIComponent(claimId)}`, {
+    method: 'DELETE',
+    headers: { Accept: 'application/json', ...authHdr(token) },
+  });
+  const data = await parseJson(res);
+  await handleResponse(res, data);
+  return data;
 }

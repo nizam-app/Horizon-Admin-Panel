@@ -1,46 +1,13 @@
-const CHECKLIST_LABELS = {
-  license: 'Driver licence',
-  taxiAuthority: 'Taxi authority',
-  registration: 'Registration',
-  otherDemand: 'Other party demand',
-  policeReport: 'Police report',
-  excessPayment: 'Excess payment',
-  repairQuote: 'Repair quote',
-  otherParties: 'Other parties detail',
-};
-
-function strVal(v) {
-  if (v == null || v === '') return '—';
-  if (typeof v === 'boolean') return v ? 'Yes' : 'No';
-  if (Array.isArray(v)) return v.filter(Boolean).join(', ') || '—';
-  return String(v);
-}
-
-function formatAttachmentNames(list) {
-  const items = Array.isArray(list) ? list : [];
-  if (!items.length) return '—';
-  return items
-    .map((f) => `${f?.name || 'file'}${f?.source ? ` (${f.source})` : ''}`)
-    .join(', ');
-}
-
-function normalizeWitnesses(data, payload) {
-  if (Array.isArray(payload?.witnessDetails) && payload.witnessDetails.length) {
-    return payload.witnessDetails;
-  }
-  const w = data?.witnessDetails;
-  if (!w || typeof w !== 'object' || Array.isArray(w)) return [];
-  return [
-    { name: w.witness1Name, address: w.witness1Address, mobile: w.witness1Mobile, email: w.witness1Email },
-    { name: w.witness2Name, address: w.witness2Address, mobile: w.witness2Mobile, email: w.witness2Email },
-  ].filter((x) => x.name || x.address || x.mobile || x.email);
-}
-
-function submissionSource(claimItem) {
-  const payload = claimItem?.payload && typeof claimItem.payload === 'object' ? claimItem.payload : null;
-  const data = claimItem?.data ?? {};
-  return { payload, data, src: payload || data };
-}
+import {
+  CHECKLIST_LABELS,
+  formatAttachmentNames,
+  mergeAttachmentLists,
+  normalizeWitnesses,
+  resolveChecklistFlag,
+  strVal,
+  submissionSource,
+} from './memberSubmissionUtils.js';
+import { MemberSubmissionEditPanel } from './MemberSubmissionEditPanel.jsx';
 
 function DetailCard({ title, items }) {
   return (
@@ -71,8 +38,57 @@ function SubmissionImage({ label, dataUrl }) {
   );
 }
 
-export function MemberSubmissionPanel({ claimItem }) {
-  const { payload, data, src } = submissionSource(claimItem);
+function AttachmentPreview({ file, index, groupTitle }) {
+  const name = file?.name || `${groupTitle} ${index + 1}`;
+  const dataUrl = typeof file?.dataUrl === 'string' ? file.dataUrl.trim() : '';
+
+  if (dataUrl.startsWith('data:image/')) {
+    return <SubmissionImage label={name} dataUrl={dataUrl} />;
+  }
+
+  if (dataUrl.startsWith('data:application/pdf') || dataUrl.startsWith('data:application/octet-stream')) {
+    return (
+      <div className="rounded-xl border border-zinc-200/90 bg-white p-3 shadow-inner">
+        <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">{name}</p>
+        <p className="mt-2 text-sm text-zinc-600">PDF attached with submission</p>
+        <a
+          href={dataUrl}
+          download={name.endsWith('.pdf') ? name : `${name}.pdf`}
+          className="mt-3 inline-flex rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs font-semibold text-zinc-800 hover:bg-zinc-100"
+        >
+          Download PDF
+        </a>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-dashed border-zinc-200 bg-zinc-50 p-3">
+      <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">{name}</p>
+      <p className="mt-2 text-sm text-zinc-600">
+        Filename recorded{file?.source ? ` (${file.source})` : ''}. No preview stored.
+      </p>
+    </div>
+  );
+}
+
+function AttachmentGallery({ title, attachments }) {
+  const items = Array.isArray(attachments) ? attachments : [];
+  if (!items.length) return null;
+  return (
+    <div className="space-y-3">
+      <h3 className="text-[13px] font-semibold text-zinc-900">{title}</h3>
+      <div className="grid gap-4 sm:grid-cols-2">
+        {items.map((file, index) => (
+          <AttachmentPreview key={file.id || `${file.name}-${index}`} file={file} index={index} groupTitle={title} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MemberSubmissionView({ claimItem }) {
+  const { payload, data, src, submission } = submissionSource(claimItem);
   if (!payload) {
     return (
       <p className="rounded-xl border border-dashed border-zinc-200 bg-zinc-50 px-4 py-8 text-center text-sm text-zinc-600">
@@ -85,29 +101,65 @@ export function MemberSubmissionPanel({ claimItem }) {
   const dr = { ...(data.driver || {}), ...(src.driver || {}) };
   const inc = { ...(data.incident || {}), ...(src.incident || {}) };
   const dmg = { ...(data.damage || {}), ...(src.damage || {}) };
-  const checklist = src.checklist || {};
+  const diagram = dmg.diagram || {};
+  const checklist = { ...(submission.checklist || {}), ...(src.checklist || {}) };
+
+  const licenseFront = mergeAttachmentLists(src.driverLicenseFrontAttachments, submission.driverLicenseFrontAttachments);
+  const licenseBack = mergeAttachmentLists(src.driverLicenseBackAttachments, submission.driverLicenseBackAttachments);
+  const taxiFiles = mergeAttachmentLists(src.taxiAuthorityAttachments, submission.taxiAuthorityAttachments);
+  const regFiles = mergeAttachmentLists(src.registrationAttachments, submission.registrationAttachments);
+  const scenePhotos = mergeAttachmentLists(diagram.scenePhotos);
+  const detailPhotos = mergeAttachmentLists(diagram.detailPhotos);
+  const sketchUploads = mergeAttachmentLists(src.accidentSketch?.attachments);
   const witnesses = normalizeWitnesses(data, payload);
   const parties = src.otherParties || data.otherParties || [];
+
+  const hasAnyChecklistData =
+    Object.values(checklist).some(Boolean) ||
+    licenseFront.length > 0 ||
+    licenseBack.length > 0 ||
+    taxiFiles.length > 0 ||
+    regFiles.length > 0;
+
+  const checklistSelected = (key) => {
+    const attachmentMap = {
+      license: [licenseFront, licenseBack],
+      taxiAuthority: [taxiFiles],
+      registration: [regFiles],
+    };
+    return resolveChecklistFlag(checklist, key, attachmentMap[key] || []) ? 'Selected' : 'Not selected';
+  };
 
   return (
     <div className="space-y-4">
       <p className="text-sm text-zinc-600">
-        Full intake as submitted through the member portal (including sketch and signature when provided).
+        Full intake as submitted through the member portal (documents, sketch, signature, and damage photos when provided).
       </p>
+
+      {!hasAnyChecklistData ? (
+        <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+          This claim has no checklist or document data stored.
+        </p>
+      ) : null}
 
       <DetailCard
         title="Checklist"
         items={[
-          ...Object.entries(CHECKLIST_LABELS).map(([key, label]) => [label, checklist[key] ? 'Selected' : 'Not selected']),
-          ['Excess applicability', src.excessPaymentApplicability],
-          ['Excess amount', src.excessPaymentAmount],
-          ['Repair quote ref.', src.repairQuoteRef],
-          ['Licence (front) files', formatAttachmentNames(src.driverLicenseFrontAttachments)],
-          ['Licence (back) files', formatAttachmentNames(src.driverLicenseBackAttachments)],
-          ['Taxi authority files', formatAttachmentNames(src.taxiAuthorityAttachments)],
-          ['Registration files', formatAttachmentNames(src.registrationAttachments)],
+          ...Object.entries(CHECKLIST_LABELS).map(([key, label]) => [label, checklistSelected(key)]),
+          ['Excess applicability', src.excessPaymentApplicability || submission.excessPaymentApplicability],
+          ['Excess amount', src.excessPaymentAmount || submission.excessPaymentAmount],
+          ['Repair quote ref.', src.repairQuoteRef || submission.repairQuoteRef],
+          ['Licence (front) files', formatAttachmentNames(licenseFront)],
+          ['Licence (back) files', formatAttachmentNames(licenseBack)],
+          ['Taxi authority files', formatAttachmentNames(taxiFiles)],
+          ['Registration files', formatAttachmentNames(regFiles)],
         ]}
       />
+
+      <AttachmentGallery title="Driver licence — front" attachments={licenseFront} />
+      <AttachmentGallery title="Driver licence — back" attachments={licenseBack} />
+      <AttachmentGallery title="Taxi authority" attachments={taxiFiles} />
+      <AttachmentGallery title="Copy of registration" attachments={regFiles} />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <DetailCard
@@ -177,30 +229,43 @@ export function MemberSubmissionPanel({ claimItem }) {
           ['Tow location', dmg.towLocation],
           ['Distance towed', dmg.distanceTowed],
           ['Vehicle location', dmg.currentVehicleLocation],
-          ['Scene photos', formatAttachmentNames(dmg.diagram?.scenePhotos)],
-          ['Detail photos', formatAttachmentNames(dmg.diagram?.detailPhotos)],
+          ['Damage markers', Array.isArray(diagram.markers) ? diagram.markers.length : Object.keys(dmg.points || {}).length || 0],
+          ['Scene photos', formatAttachmentNames(scenePhotos)],
+          ['Detail photos', formatAttachmentNames(detailPhotos)],
         ]}
       />
+
+      <AttachmentGallery title="Damage — scene photos" attachments={scenePhotos} />
+      <AttachmentGallery title="Damage — close-up photos" attachments={detailPhotos} />
 
       {parties.length > 0 && (
         <div className="space-y-3">
           <h3 className="text-[13px] font-semibold text-zinc-900">Other parties ({parties.length})</h3>
-          {parties.map((party, i) => (
-            <DetailCard
-              key={`party-${i}`}
-              title={`Party ${i + 1} — ${party.plateNumber || 'No plate'}`}
-              items={[
-                ['Driver', party.driverName],
-                ['Make / model / colour', [party.make, party.model, party.color].filter(Boolean).join(' / ')],
-                ['Owner', party.ownerDetails],
-                ['Address', party.address],
-                ['Contact', [party.mobile, party.email].filter(Boolean).join(' · ')],
-                ['Licence', party.licenceNumber],
-                ['Insurance', party.insuranceCompany],
-                ['Claim no.', party.claimNumber],
-              ]}
-            />
-          ))}
+          {parties.map((party, i) => {
+            const partyFront = mergeAttachmentLists(party.licenceFrontAttachments);
+            const partyBack = mergeAttachmentLists(party.licenceBackAttachments);
+            return (
+              <div key={`party-${i}`} className="space-y-3">
+                <DetailCard
+                  title={`Party ${i + 1} — ${party.plateNumber || 'No plate'}`}
+                  items={[
+                    ['Driver', party.driverName],
+                    ['Make / model / colour', [party.make, party.model, party.color].filter(Boolean).join(' / ')],
+                    ['Owner', party.ownerDetails],
+                    ['Address', party.address],
+                    ['Contact', [party.mobile, party.email].filter(Boolean).join(' · ')],
+                    ['Licence', party.licenceNumber],
+                    ['Insurance', party.insuranceCompany],
+                    ['Claim no.', party.claimNumber],
+                    ['Licence (front)', formatAttachmentNames(partyFront)],
+                    ['Licence (back)', formatAttachmentNames(partyBack)],
+                  ]}
+                />
+                <AttachmentGallery title={`Party ${i + 1} — licence front`} attachments={partyFront} />
+                <AttachmentGallery title={`Party ${i + 1} — licence back`} attachments={partyBack} />
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -230,9 +295,14 @@ export function MemberSubmissionPanel({ claimItem }) {
         <SubmissionImage label="Signature" dataUrl={src.declaration?.signatureDataUrl} />
       </div>
 
-      {Array.isArray(src.accidentSketch?.attachments) && src.accidentSketch.attachments.length > 0 && (
-        <DetailCard title="Sketch uploads" items={[['Files', formatAttachmentNames(src.accidentSketch.attachments)]]} />
-      )}
+      <AttachmentGallery title="Sketch uploads" attachments={sketchUploads} />
     </div>
   );
+}
+
+export function MemberSubmissionPanel({ claimItem, readOnly = true, onSaveSection }) {
+  if (!readOnly && onSaveSection) {
+    return <MemberSubmissionEditPanel claimItem={claimItem} onSaveSection={onSaveSection} />;
+  }
+  return <MemberSubmissionView claimItem={claimItem} />;
 }

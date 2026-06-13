@@ -26,6 +26,7 @@ import {
 
 import * as api from './api.js';
 import { MemberSubmissionPanel } from './MemberSubmissionPanel.jsx';
+import { buildClaimExportHtml, openClaimExportPrint } from './claimExportHtml.js';
 
 /** Payment status is only `pending` or `completed`; maps legacy stored values. */
 function normalizePaymentStatus(raw) {
@@ -403,6 +404,127 @@ function ConfirmDialog({
   );
 }
 
+const DELETE_CONFIRM_WORD = 'delete';
+
+function ClaimDeleteConfirmDialog({
+  open,
+  claimItem,
+  busy = false,
+  errorMessage = '',
+  onConfirm,
+  onCancel,
+}) {
+  const [typed, setTyped] = useState('');
+  const inputRef = useRef(null);
+  const canConfirm = typed.trim().toLowerCase() === DELETE_CONFIRM_WORD;
+
+  useEffect(() => {
+    if (!open) {
+      setTyped('');
+      return undefined;
+    }
+    const t = window.setTimeout(() => inputRef.current?.focus(), 50);
+    const onKey = (e) => {
+      if (e.key === 'Escape' && !busy) onCancel();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.clearTimeout(t);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [open, busy, onCancel]);
+
+  if (!open || !claimItem) return null;
+
+  const refLabel = claimItem.intakeReference || claimItem.reference || claimItem.plateNumber || 'this claim';
+  const driverLine = claimItem.driverName ? ` · ${claimItem.driverName}` : '';
+
+  return (
+    <div
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-zinc-950/60 p-4 backdrop-blur-sm"
+      role="presentation"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget && !busy) onCancel();
+      }}
+    >
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="claim-delete-title"
+        aria-describedby="claim-delete-desc"
+        className="w-full max-w-lg rounded-2xl border border-rose-200/90 bg-white p-5 shadow-sheet-lg"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-rose-100 text-rose-700">
+            <Trash2 className="h-5 w-5" strokeWidth={2} aria-hidden />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h3 id="claim-delete-title" className="font-display text-base font-semibold text-zinc-950">
+              Delete claim permanently?
+            </h3>
+            <p id="claim-delete-desc" className="mt-2 text-sm leading-relaxed text-zinc-600">
+              You are about to delete{' '}
+              <span className="font-mono font-semibold text-zinc-900">{refLabel}</span>
+              {driverLine}. This removes the full member submission, admin workspace (quotes, parts, notes),
+              uploaded PDFs, and cannot be undone.
+            </p>
+          </div>
+        </div>
+
+        <ul className="mt-4 space-y-1.5 rounded-xl border border-rose-100 bg-rose-50/60 px-3 py-3 text-2xs leading-relaxed text-rose-950">
+          <li>Member reference: {claimItem.intakeReference || '—'}</li>
+          <li>System reference: {claimItem.reference || '—'}</li>
+          <li>Plate: {claimItem.plateNumber || '—'}</li>
+          <li>Status: {claimItem.status || '—'}</li>
+        </ul>
+
+        <label className="mt-4 block">
+          <span className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">
+            Type <span className="font-mono normal-case text-zinc-800">{DELETE_CONFIRM_WORD}</span> to confirm
+          </span>
+          <input
+            ref={inputRef}
+            type="text"
+            value={typed}
+            disabled={busy}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder={DELETE_CONFIRM_WORD}
+            onChange={(e) => setTyped(e.target.value)}
+            className="mt-2 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2.5 font-mono text-sm text-zinc-900 shadow-inner outline-none placeholder:text-zinc-400 focus:border-rose-400 focus:ring-2 focus:ring-rose-500/15 disabled:opacity-60"
+          />
+        </label>
+
+        {errorMessage ? (
+          <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+            {errorMessage}
+          </p>
+        ) : null}
+
+        <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onCancel}
+            className="inline-flex h-10 items-center justify-center rounded-lg border border-zinc-200 bg-white px-4 text-2xs font-semibold text-zinc-800 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={busy || !canConfirm}
+            onClick={onConfirm}
+            className="inline-flex h-10 items-center justify-center rounded-lg bg-rose-600 px-4 text-2xs font-semibold text-white shadow-sm transition hover:bg-rose-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/80 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {busy ? 'Deleting…' : 'Delete claim permanently'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PurchaseInvoicesSection({
   part,
   isModerator,
@@ -754,6 +876,9 @@ function App() {
   const [claimsError, setClaimsError] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedClaim, setSelectedClaim] = useState(null);
+  const [pendingDeleteClaim, setPendingDeleteClaim] = useState(null);
+  const [claimDeleteBusy, setClaimDeleteBusy] = useState(false);
+  const [claimDeleteError, setClaimDeleteError] = useState('');
   const [statusFilter, setStatusFilter] = useState('All');
   const [workspaceSave, setWorkspaceSave] = useState('idle');
 
@@ -942,6 +1067,64 @@ function App() {
     [session, selectedClaim, applyClaimFromServer]
   );
 
+  const saveMemberSubmission = useCallback(
+    async (section, data) => {
+      if (!session?.token || session.role !== 'admin' || !selectedClaim) {
+        throw new Error('Not authorized');
+      }
+      const claimId = claimMongoId(selectedClaim);
+      if (!claimId) throw new Error('Invalid claim id');
+      const updated = await api.patchMemberSubmission(session.token, claimId, section, data);
+      applyClaimFromServer(updated);
+      return updated;
+    },
+    [session, selectedClaim, applyClaimFromServer]
+  );
+
+  const deleteClaimRecord = useCallback(
+    async (claimId) => {
+      if (!session?.token || session.role !== 'admin') {
+        throw new Error('Only administrators can delete claims');
+      }
+      const id = api.normalizeClaimId(claimId);
+      if (!id) throw new Error('Invalid claim id');
+      await api.deleteClaim(session.token, id);
+      setClaims((curr) => curr.filter((c) => claimMongoId(c) !== id));
+      setSelectedClaim(null);
+    },
+    [session],
+  );
+
+  const requestDeleteClaim = useCallback((item) => {
+    if (!item) return;
+    setClaimDeleteError('');
+    setPendingDeleteClaim(item);
+  }, []);
+
+  const confirmDeleteClaim = useCallback(async () => {
+    if (!pendingDeleteClaim || claimDeleteBusy) return;
+    const claimId = claimMongoId(pendingDeleteClaim);
+    if (!claimId) {
+      setClaimDeleteError('Invalid claim id — refresh the queue and try again.');
+      return;
+    }
+    setClaimDeleteBusy(true);
+    setClaimDeleteError('');
+    try {
+      await deleteClaimRecord(claimId);
+      setPendingDeleteClaim(null);
+    } catch (e) {
+      if (e instanceof api.ApiAuthError) {
+        logout();
+        setPendingDeleteClaim(null);
+      } else {
+        setClaimDeleteError(e?.message ? String(e.message) : 'Could not delete claim. Try again.');
+      }
+    } finally {
+      setClaimDeleteBusy(false);
+    }
+  }, [pendingDeleteClaim, claimDeleteBusy, deleteClaimRecord, logout]);
+
   useEffect(() => {
     if (!session?.token) return undefined;
     let cancelled = false;
@@ -1052,146 +1235,30 @@ function App() {
     setSelectedClaim((current) => mergeInto(current));
   };
 
-  const exportClaimToPdf = (item) => {
-    const printable = window.open('', '_blank', 'width=960,height=720');
-    if (!printable) return;
+  const exportClaimToPdf = async (item) => {
+    const claimId = api.normalizeClaimId(item?.id ?? item?._id);
+    const filename = `claim-${item?.intakeReference || claimId || 'export'}.pdf`;
 
-    const data = item.data ?? {};
-    const otherParties = data.otherParties ?? [];
-    const caseFiles = item.caseFiles ?? [];
-    const quoteOptions = item.quoteOptions ?? [];
-    const primaryQuote = quoteOptions.find((q) => q.id === item.primaryQuoteId);
-    const finalQuote = quoteOptions.find((q) => q.id === item.finalQuoteId);
-    const pdfList =
-      caseFiles.length > 0
-        ? caseFiles.map((f) => `${f.name} (${f.uploadedAt})`).join('<br/>')
-        : 'No PDFs attached in this workspace snapshot.';
-    const quoteSummary = `
-      <p><strong>Quote price (repair shop):</strong> ${
-        item.quotePrice != null ? formatAud(item.quotePrice) : 'Not set'
-      }</p>
-      <p><strong>Insurance company price:</strong> ${
-        item.insuranceApprovedPrice != null ? formatAud(item.insuranceApprovedPrice) : 'Not set'
-      }</p>
-      <p><strong>Primary workshop line:</strong> ${
-        primaryQuote ? `${primaryQuote.supplier} (${formatAud(primaryQuote.amount)})` : 'Not selected'
-      }</p>
-      <p><strong>Final workshop line:</strong> ${
-        finalQuote ? `${finalQuote.supplier} (${formatAud(finalQuote.amount)})` : 'Not set'
-      }</p>
-    `;
-    const paymentLine = paymentStatusLabel(item.paymentStatus);
-    const noteHtml = escapeHtml(item.adminNote || '').replace(/\n/g, '<br/>') || '—';
-    const parts = item.parts ?? [];
-    const partsHtml = parts.length
-      ? `<table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr>
-          <th align="left">Supplier</th><th align="left">Part</th><th align="right">Amount</th>
-          <th align="left">Order</th><th align="left">Tentative recv.</th><th align="left">Received by</th>
-          <th align="left">Invoice #</th><th align="left">Status</th>
-        </tr></thead><tbody>${parts
-          .map(
-            (p) =>
-              `<tr>
-                <td>${escapeHtml(p.company || '—')}</td>
-                <td>${escapeHtml(p.partName || '—')}</td>
-                <td align="right">${formatAud(p.amount)}</td>
-                <td>${escapeHtml(p.orderDate || '—')}</td>
-                <td>${escapeHtml(p.tentativeReceivedDate || '—')}</td>
-                <td>${escapeHtml(p.receivedBy || '—')}</td>
-                <td>${(p.invoices?.length
-                  ? p.invoices.map((inv) => escapeHtml(inv.invoiceNumber || '—')).join('<br/>')
-                  : escapeHtml(p.invoiceNumber || '—'))}</td>
-                <td>${escapeHtml(p.status)}</td>
-              </tr>`,
-          )
-          .join('')}</tbody></table>`
-      : '<p>No purchase lines recorded.</p>';
-    const damageMarkerCount = data.damage?.points
-      ? Object.values(data.damage.points).reduce((count, list) => count + list.length, 0)
-      : 0;
-    const vehicleSummary = [data.memberVehicle?.make, data.memberVehicle?.model].filter(Boolean).join(' ') || 'Not provided';
-    const trafficControls = data.incident?.trafficControls?.join(', ') || 'Not provided';
-    const otherPartySummary = otherParties.length
-      ? otherParties
-          .map((party, index) => `Vehicle ${index + 1}: ${party.plateNumber || 'No plate'} - ${party.driverName || 'No driver name'}`)
-          .join('<br/>')
-      : 'No other party records attached.';
+    if (session?.token && claimId) {
+      try {
+        await api.downloadClaimExportPdf(session.token, claimId, filename);
+        return;
+      } catch (e) {
+        if (e instanceof api.ApiAuthError) {
+          logout();
+          return;
+        }
+        console.warn('Server PDF export failed, using browser print fallback:', e);
+      }
+    }
 
-    printable.document.write(`
-      <html>
-        <head>
-          <title>Claim ${item.plateNumber}</title>
-          <style>
-            body { font-family: Inter, system-ui, sans-serif; padding: 40px; color: #0f172a; line-height: 1.55; font-size: 14px; }
-            h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.02em; }
-            .ref { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 20px; }
-            .meta { margin-bottom: 24px; color: #475569; font-size: 13px; }
-            .section { margin-top: 24px; }
-            .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-            .card { background: #f8fafc; border: 1px solid #e2e8f0; padding: 14px 16px; border-radius: 6px; }
-            .label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: #64748b; }
-            .value { margin-top: 8px; font-size: 14px; color: #0f172a; }
-          </style>
-        </head>
-        <body>
-          <h1>Horizon Smash Repairs Claim Export</h1>
-          <div class="ref">${escapeHtml(claimExportRefSummary(item))}</div>
-          <div class="meta">
-            <p><strong>Plate:</strong> ${item.plateNumber}</p>
-            <p><strong>Driver:</strong> ${item.driverName}</p>
-            <p><strong>Status:</strong> ${item.status}</p>
-            <p><strong>Incident Date:</strong> ${item.dateOfIncident}</p>
-          </div>
-          <div class="section grid">
-            <div class="card"><div class="label">Owner</div><div class="value">${data.memberVehicle?.ownerName || 'Not provided'}</div></div>
-            <div class="card"><div class="label">Vehicle</div><div class="value">${vehicleSummary}</div></div>
-            <div class="card"><div class="label">Suburb</div><div class="value">${data.incident?.suburb || 'Not provided'}</div></div>
-            <div class="card"><div class="label">Road Surface</div><div class="value">${data.incident?.roadSurface || 'Not provided'}</div></div>
-            <div class="card"><div class="label">Traffic Controls</div><div class="value">${trafficControls}</div></div>
-            <div class="card"><div class="label">Damage Markers</div><div class="value">${damageMarkerCount}</div></div>
-          </div>
-          <div class="section">
-            <div class="card">
-              <div class="label">Claim Summary</div>
-              <div class="value">${data.incident?.description || item.summary}</div>
-            </div>
-          </div>
-          <div class="section">
-            <div class="card">
-              <div class="label">Quotes</div>
-              <div class="value">${quoteSummary}</div>
-            </div>
-          </div>
-          <div class="section">
-            <div class="card">
-              <div class="label">Payment status</div>
-              <div class="value">${paymentLine}</div>
-            </div>
-          </div>
-          <div class="section">
-            <div class="card">
-              <div class="label">Admin note</div>
-              <div class="value">${noteHtml}</div>
-            </div>
-          </div>
-          <div class="section">
-            <div class="card">
-              <div class="label">Parts</div>
-              <div class="value">${partsHtml}</div>
-            </div>
-          </div>
-          <div class="section">
-            <div class="card">
-              <div class="label">PDF attachments (names)</div>
-              <div class="value">${pdfList}</div>
-            </div>
-          </div>
-        </body>
-      </html>
-    `);
-    printable.document.close();
-    printable.focus();
-    printable.print();
+    openClaimExportPrint(
+      buildClaimExportHtml(item, {
+        refSummary: claimExportRefSummary(item),
+        formatAud,
+        paymentLabel: paymentStatusLabel(item.paymentStatus),
+      }),
+    );
   };
 
   const openRow = async (item) => {
@@ -1454,7 +1521,9 @@ function App() {
                         <th className="px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Payment</th>
                         <th className="px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Priority</th>
                         <th className="px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Status</th>
-                        <th className="w-10 px-3 py-2.5" aria-hidden />
+                        <th className="w-[72px] px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">
+                          {isModerator ? '' : 'Actions'}
+                        </th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-100">
@@ -1528,8 +1597,21 @@ function App() {
                             <td className="px-3 py-2.5">
                               <StatusBadge status={item.status} />
                             </td>
-                            <td className="px-3 py-2.5 text-zinc-300">
-                              <ChevronRight className="h-4 w-4" strokeWidth={2} aria-hidden />
+                            <td className="px-3 py-2.5" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                              <div className="flex items-center justify-end gap-1">
+                                {!isModerator ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => requestDeleteClaim(item)}
+                                    title="Delete claim"
+                                    aria-label={`Delete claim ${item.intakeReference || item.plateNumber || item.driverName}`}
+                                    className="flex h-8 w-8 items-center justify-center rounded-lg border border-transparent text-zinc-400 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/80"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" strokeWidth={2} />
+                                  </button>
+                                ) : null}
+                                <ChevronRight className="h-4 w-4 shrink-0 text-zinc-300" strokeWidth={2} aria-hidden />
+                              </div>
                             </td>
                           </tr>
                         );
@@ -1651,8 +1733,24 @@ function App() {
           onSaveParts={saveParts}
           onSaveQuoteWorkspace={saveQuoteWorkspace}
           onSavePaymentStatus={savePaymentStatus}
+          onSaveMemberSubmission={saveMemberSubmission}
+          onRequestDelete={() => requestDeleteClaim(selectedClaim)}
         />
       )}
+
+      <ClaimDeleteConfirmDialog
+        open={Boolean(pendingDeleteClaim)}
+        claimItem={pendingDeleteClaim}
+        busy={claimDeleteBusy}
+        errorMessage={claimDeleteError}
+        onConfirm={confirmDeleteClaim}
+        onCancel={() => {
+          if (!claimDeleteBusy) {
+            setPendingDeleteClaim(null);
+            setClaimDeleteError('');
+          }
+        }}
+      />
     </div>
   );
 }
@@ -1838,6 +1936,8 @@ function ClaimModal({
   onSaveParts,
   onSaveQuoteWorkspace,
   onSavePaymentStatus,
+  onSaveMemberSubmission,
+  onRequestDelete,
 }) {
   const [tab, setTab] = useState('overview');
   const [pdfBusy, setPdfBusy] = useState(false);
@@ -1866,6 +1966,8 @@ function ClaimModal({
   const [paymentSaveKind, setPaymentSaveKind] = useState(null);
   const isModerator = role === 'moderator';
   const fileInputRef = useRef(null);
+
+  const openDeleteDialog = () => onRequestDelete?.();
 
   useEffect(() => {
     setTab('overview');
@@ -2334,7 +2436,13 @@ function ClaimModal({
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin bg-zinc-50/40 px-4 py-4 sm:px-6 sm:py-5">
-            {tab === 'submission' && <MemberSubmissionPanel claimItem={claimItem} />}
+            {tab === 'submission' && (
+              <MemberSubmissionPanel
+                claimItem={claimItem}
+                readOnly={isModerator}
+                onSaveSection={isModerator ? undefined : onSaveMemberSubmission}
+              />
+            )}
 
             {tab === 'overview' && (
               <div className="space-y-4">
@@ -2450,6 +2558,23 @@ function ClaimModal({
                     />
                   </div>
                 </div>
+                {!isModerator && onRequestDelete ? (
+                  <section className="rounded-xl border border-rose-200/90 bg-rose-50/40 p-4 shadow-inner">
+                    <h3 className="text-[13px] font-semibold text-rose-950">Danger zone</h3>
+                    <p className="mt-1 text-2xs leading-relaxed text-rose-900/80">
+                      Permanently remove this claim from the queue. Member submission, admin notes, quotes, purchase
+                      lines, and uploaded PDFs will be deleted. This action cannot be undone.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={openDeleteDialog}
+                      className="mt-3 inline-flex h-9 items-center gap-2 rounded-lg border border-rose-300/90 bg-white px-3 text-2xs font-semibold text-rose-800 shadow-sm transition hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/80"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" strokeWidth={2} />
+                      Delete this claim…
+                    </button>
+                  </section>
+                ) : null}
               </div>
             )}
 
@@ -3235,10 +3360,24 @@ function ClaimModal({
               </button>
             </div>
           ) : (
-            <div className="flex shrink-0 flex-col gap-2 border-t border-zinc-200/90 bg-white/95 px-4 py-3 shadow-[0_-8px_24px_-12px_rgba(0,0,0,0.08)] backdrop-blur-md sm:flex-row sm:items-center sm:justify-between sm:px-6">
-              <p className="text-2xs text-zinc-500 sm:max-w-sm">
-                Use Save or Update on each section (insurance quote, purchase, admin note) to persist changes.
-              </p>
+            <div className="flex shrink-0 flex-col gap-2 border-t border-zinc-200/90 bg-white/95 px-4 py-3 shadow-[0_-8px_24px_-12px_rgba(0,0,0,0.08)] backdrop-blur-md sm:px-6">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                {onRequestDelete ? (
+                  <button
+                    type="button"
+                    onClick={openDeleteDialog}
+                    className="inline-flex h-9 items-center gap-1.5 self-start rounded-lg border border-rose-200/90 bg-rose-50 px-3 text-2xs font-semibold text-rose-800 transition hover:bg-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/80"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" strokeWidth={2} />
+                    Delete claim
+                  </button>
+                ) : (
+                  <span className="hidden sm:block" aria-hidden />
+                )}
+                <p className="text-2xs text-zinc-500 sm:max-w-sm sm:text-right">
+                  Use Save or Update on each section (insurance quote, purchase, admin note) to persist changes.
+                </p>
+              </div>
               <div className="flex flex-wrap gap-2 sm:justify-end">
                 <button
                   type="button"
