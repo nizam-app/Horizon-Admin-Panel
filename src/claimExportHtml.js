@@ -200,12 +200,14 @@ export function buildClaimExportHtml(item, meta) {
                 <td>${esc(p.company)}</td>
                 <td>${esc(p.partName)}</td>
                 <td>${esc(meta.formatAud(p.amount))}</td>
+                <td>${p.quotePrice == null ? '—' : esc(meta.formatAud(p.quotePrice))}</td>
+                <td>${p.quotePrice == null ? '—' : esc(meta.formatAud((Number(p.amount) || 0) - (Number(p.quotePrice) || 0)))}</td>
                 <td>${esc(p.orderDate)}</td>
                 <td>${esc(p.status)}</td>
               </tr>`,
           )
           .join('')
-      : '<tr><td colspan="6">No purchase lines.</td></tr>';
+      : '<tr><td colspan="8">No purchase lines.</td></tr>';
 
   const diagramResolved = resolveDamageDiagramFromDamage(dmg);
   const markerCount = diagramResolved.markers.length;
@@ -349,7 +351,7 @@ export function buildClaimExportHtml(item, meta) {
     <section class="section">
       <h2>11. Purchase lines</h2>
       <table class="parts">
-        <thead><tr><th>#</th><th>Supplier</th><th>Part</th><th>Amount</th><th>Order</th><th>Status</th></tr></thead>
+        <thead><tr><th>#</th><th>Supplier</th><th>Part</th><th>Amount</th><th>Quote</th><th>Difference</th><th>Order</th><th>Status</th></tr></thead>
         <tbody>${partsRows}</tbody>
       </table>
     </section>

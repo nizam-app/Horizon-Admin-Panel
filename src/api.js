@@ -210,6 +210,12 @@ export function mapPartsForApi(parts) {
       company: String(p.company ?? '').trim(),
       partName: String(p.partName ?? '').trim(),
       amount: typeof p.amount === 'number' && !Number.isNaN(p.amount) ? p.amount : Number(p.amount) || 0,
+      quotePrice:
+        p.quotePrice === '' || p.quotePrice == null
+          ? null
+          : typeof p.quotePrice === 'number' && !Number.isNaN(p.quotePrice)
+            ? p.quotePrice
+            : Number(p.quotePrice) || null,
       orderDate: mapPartDateForApi(p.orderDate),
       tentativeReceivedDate: mapPartDateForApi(p.tentativeReceivedDate),
       receivedBy: String(p.receivedBy ?? '').trim(),

@@ -34,7 +34,17 @@ function SubmissionImage({ label, dataUrl }) {
   if (!src.startsWith('data:image/')) return null;
   return (
     <div className="rounded-xl border border-zinc-200/90 bg-white p-3 shadow-inner">
-      <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">{label}</p>
+      <div className="flex items-center justify-between gap-2">
+        <p className="min-w-0 truncate text-2xs font-semibold uppercase tracking-wider text-zinc-500">{label}</p>
+        <a
+          href={src}
+          target="_blank"
+          rel="noreferrer"
+          className="shrink-0 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 text-2xs font-semibold text-zinc-800 hover:bg-zinc-100"
+        >
+          View image
+        </a>
+      </div>
       <img src={src} alt={label} className="mt-2 max-h-56 w-full rounded-lg border border-zinc-100 object-contain" />
     </div>
   );

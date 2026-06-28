@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { CheckCircle2, Loader2, Plus, Trash2, Upload } from 'lucide-react';
+import { CheckCircle2, ChevronLeft, ChevronRight, Eye, ExternalLink, Loader2, Plus, Trash2, Upload, X } from 'lucide-react';
 
 import { DamageDiagramViewer } from './DamageDiagramViewer.jsx';
 import {
@@ -194,9 +194,158 @@ function EditSection({
   );
 }
 
+function attachmentKind(file) {
+  const dataUrl = typeof file?.dataUrl === 'string' ? file.dataUrl.trim() : '';
+  if (dataUrl.startsWith('data:image/')) return 'image';
+  if (dataUrl.startsWith('data:application/pdf') || dataUrl.startsWith('data:application/octet-stream')) return 'pdf';
+  return 'file';
+}
+
+function AttachmentPreviewDialog({ files, index, onChangeIndex, onClose }) {
+  const list = Array.isArray(files) ? files : [];
+  const file = index == null ? null : list[index];
+
+  useEffect(() => {
+    if (!file) return undefined;
+    const onKey = (e) => {
+      if (e.key === 'Escape') onClose();
+      if (e.key === 'ArrowLeft' && list.length > 1) onChangeIndex((index - 1 + list.length) % list.length);
+      if (e.key === 'ArrowRight' && list.length > 1) onChangeIndex((index + 1) % list.length);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [file, index, list.length, onChangeIndex, onClose]);
+
+  if (!file) return null;
+
+  const name = file.name || 'Attachment';
+  const dataUrl = typeof file.dataUrl === 'string' ? file.dataUrl.trim() : '';
+  const kind = attachmentKind(file);
+  const canNavigate = list.length > 1;
+  const previous = () => onChangeIndex((index - 1 + list.length) % list.length);
+  const next = () => onChangeIndex((index + 1) % list.length);
+
+  return (
+    <div
+      className="fixed inset-0 z-[90] flex items-center justify-center bg-zinc-950/70 p-3 backdrop-blur-sm"
+      role="presentation"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Preview ${name}`}
+        className="flex max-h-[96dvh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sheet-lg"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-zinc-200/90 px-3 py-3 sm:px-4">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-semibold text-zinc-950">{name}</p>
+            <p className="text-2xs text-zinc-500">
+              {file.source || 'upload'}
+              {list.length > 1 ? ` · ${index + 1} of ${list.length}` : ''}
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {dataUrl ? (
+              <a
+                href={dataUrl}
+                target="_blank"
+                rel="noreferrer"
+                download={name}
+                className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 text-2xs font-semibold text-zinc-800 hover:bg-zinc-50"
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+                Open
+              </a>
+            ) : null}
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50"
+              aria-label="Close preview"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+
+        <div className="grid min-h-0 flex-1 bg-zinc-100 lg:grid-cols-[1fr_220px]">
+          <div className="relative min-h-0 overflow-auto p-3">
+            {canNavigate ? (
+              <>
+                <button
+                  type="button"
+                  onClick={previous}
+                  className="absolute left-4 top-1/2 z-10 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-white/70 bg-zinc-950/55 text-white shadow-lg backdrop-blur transition hover:bg-zinc-950/75"
+                  aria-label="Previous attachment"
+                >
+                  <ChevronLeft className="h-5 w-5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={next}
+                  className="absolute right-4 top-1/2 z-10 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-white/70 bg-zinc-950/55 text-white shadow-lg backdrop-blur transition hover:bg-zinc-950/75"
+                  aria-label="Next attachment"
+                >
+                  <ChevronRight className="h-5 w-5" />
+                </button>
+              </>
+            ) : null}
+            {kind === 'image' ? (
+              <img src={dataUrl} alt={name} className="mx-auto max-h-[78dvh] max-w-full rounded-lg bg-white object-contain shadow-sm" />
+            ) : kind === 'pdf' ? (
+              <iframe title={name} src={dataUrl} className="h-[78dvh] w-full rounded-lg border border-zinc-200 bg-white" />
+            ) : (
+              <div className="rounded-xl border border-dashed border-zinc-300 bg-white px-4 py-10 text-center text-sm text-zinc-600">
+                This attachment has no preview data. Use Open if available.
+              </div>
+            )}
+          </div>
+          <aside className="hidden min-h-0 overflow-y-auto border-l border-zinc-200 bg-white p-3 lg:block">
+            <p className="mb-2 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Attachments</p>
+            <div className="space-y-2">
+              {list.map((item, itemIndex) => {
+                const itemKind = attachmentKind(item);
+                return (
+                  <button
+                    key={item.id || `${item.name}-${itemIndex}`}
+                    type="button"
+                    onClick={() => onChangeIndex(itemIndex)}
+                    className={`flex w-full items-center gap-2 rounded-lg border p-2 text-left transition ${
+                      itemIndex === index
+                        ? 'border-indigo-300 bg-indigo-50 text-indigo-950'
+                        : 'border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50'
+                    }`}
+                  >
+                    {itemKind === 'image' ? (
+                      <img src={item.dataUrl} alt="" className="h-10 w-10 shrink-0 rounded-md border border-zinc-200 object-cover" />
+                    ) : (
+                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-zinc-200 bg-zinc-50 text-[10px] font-semibold uppercase text-zinc-500">
+                        {itemKind}
+                      </span>
+                    )}
+                    <span className="min-w-0">
+                      <span className="block truncate text-xs font-semibold">{item.name || 'Attachment'}</span>
+                      <span className="block text-2xs opacity-70">{item.source || 'upload'}</span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </aside>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AttachmentEditor({ title, files, onChange }) {
   const inputRef = useRef(null);
   const [busy, setBusy] = useState(false);
+  const [previewIndex, setPreviewIndex] = useState(null);
   const list = Array.isArray(files) ? files : [];
 
   const removeAt = (index) => onChange(list.filter((_, i) => i !== index));
@@ -219,6 +368,7 @@ function AttachmentEditor({ title, files, onChange }) {
 
   return (
     <div className="space-y-3">
+      <AttachmentPreviewDialog files={list} index={previewIndex} onChangeIndex={setPreviewIndex} onClose={() => setPreviewIndex(null)} />
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className={labelClass}>{title}</p>
         <button
@@ -250,15 +400,23 @@ function AttachmentEditor({ title, files, onChange }) {
             return (
               <li
                 key={file.id || `${file.name}-${index}`}
-                className="flex items-start gap-3 rounded-lg border border-zinc-200/90 bg-zinc-50/80 p-3"
+                className="group flex items-start gap-3 rounded-lg border border-zinc-200/90 bg-zinc-50/80 p-3 transition hover:border-indigo-200 hover:bg-indigo-50/30"
               >
-                {preview ? (
-                  <img src={file.dataUrl} alt="" className="h-14 w-14 shrink-0 rounded-md border border-zinc-200 object-cover" />
-                ) : (
-                  <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-md border border-zinc-200 bg-white text-2xs font-semibold text-zinc-500">
-                    PDF
-                  </div>
-                )}
+                <button
+                  type="button"
+                  onClick={() => setPreviewIndex(index)}
+                  className="relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-zinc-200 bg-white text-2xs font-semibold text-zinc-500 ring-offset-2 transition group-hover:border-indigo-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+                  aria-label={`Preview ${file.name || 'attachment'}`}
+                >
+                  {preview ? (
+                    <img src={file.dataUrl} alt="" className="h-full w-full object-cover" />
+                  ) : (
+                    <span className="flex h-full w-full items-center justify-center uppercase">{attachmentKind(file)}</span>
+                  )}
+                  <span className="absolute inset-0 flex items-center justify-center bg-zinc-950/0 text-white opacity-0 transition group-hover:bg-zinc-950/35 group-hover:opacity-100">
+                    <Eye className="h-4 w-4" />
+                  </span>
+                </button>
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium text-zinc-900">{file.name || 'file'}</p>
                   <p className="text-2xs text-zinc-500">{file.source || 'upload'}</p>

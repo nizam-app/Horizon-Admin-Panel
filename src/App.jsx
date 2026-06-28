@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
   Banknote,
   CheckCircle2,
+  ChevronLeft,
   ChevronRight,
   Download,
   FileCheck2,
@@ -236,6 +237,7 @@ function newPartLine() {
     company: '',
     partName: '',
     amount: '',
+    quotePrice: '',
     orderDate: '',
     tentativeReceivedDate: '',
     receivedBy: '',
@@ -278,6 +280,7 @@ function normalizePartInvoicesFromRow(p) {
 function normalizePartRow(p) {
   return {
     ...p,
+    quotePrice: p?.quotePrice ?? '',
     invoices: normalizePartInvoicesFromRow(p),
   };
 }
@@ -299,6 +302,10 @@ function partAmountNumber(amount) {
   return parseMoneyInput(amount === '' || amount == null ? '' : String(amount)) ?? 0;
 }
 
+function partOptionalMoneyNumber(amount) {
+  return parseMoneyInput(amount === '' || amount == null ? '' : String(amount));
+}
+
 function partsSnapshot(parts) {
   return cloneParts(parts)
     .map((p) => ({
@@ -306,6 +313,7 @@ function partsSnapshot(parts) {
       company: String(p.company ?? ''),
       partName: String(p.partName ?? ''),
       amount: partAmountNumber(p.amount),
+      quotePrice: partOptionalMoneyNumber(p.quotePrice),
       orderDate: String(p.orderDate ?? ''),
       tentativeReceivedDate: String(p.tentativeReceivedDate ?? ''),
       receivedBy: String(p.receivedBy ?? ''),
@@ -1910,6 +1918,30 @@ function OperationalPill({ title, text }) {
   );
 }
 
+function CaseWorkspaceStat({ label, value, tone = 'default' }) {
+  const toneClass =
+    tone === 'good'
+      ? 'border-emerald-200 bg-emerald-50 text-emerald-950'
+      : tone === 'warn'
+        ? 'border-amber-200 bg-amber-50 text-amber-950'
+        : 'border-zinc-200/90 bg-white text-zinc-950';
+  return (
+    <div className={`rounded-xl border px-3 py-2.5 shadow-inner ${toneClass}`}>
+      <p className="text-[10px] font-semibold uppercase tracking-wider opacity-70">{label}</p>
+      <p className="mt-1 truncate text-sm font-semibold">{value || '—'}</p>
+    </div>
+  );
+}
+
+function CaseWorkspaceAsideRow({ label, value }) {
+  return (
+    <div className="flex items-start justify-between gap-3 border-b border-zinc-100 py-2.5 last:border-b-0">
+      <span className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">{label}</span>
+      <span className="max-w-[11rem] text-right text-sm font-medium text-zinc-900">{value || '—'}</span>
+    </div>
+  );
+}
+
 function priceDraftFromClaim(item) {
   return {
     quote: item?.quotePrice != null && item.quotePrice !== '' ? String(item.quotePrice) : '',
@@ -1968,12 +2000,29 @@ function ClaimModal({
   const [paymentSaveKind, setPaymentSaveKind] = useState(null);
   const isModerator = role === 'moderator';
   const fileInputRef = useRef(null);
+  const tabRailRef = useRef(null);
 
   const openDeleteDialog = () => onRequestDelete?.();
+
+  const scrollTabRail = (direction) => {
+    const rail = tabRailRef.current;
+    if (!rail) return;
+    rail.scrollBy({
+      left: direction * Math.max(180, rail.clientWidth * 0.72),
+      behavior: 'smooth',
+    });
+  };
 
   useEffect(() => {
     setTab('overview');
   }, [claimItem.id, claimItem._id]);
+
+  useEffect(() => {
+    const rail = tabRailRef.current;
+    if (!rail) return;
+    const active = rail.querySelector('[data-active-tab="true"]');
+    active?.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+  }, [tab]);
 
   useEffect(() => {
     setPriceDraft(priceDraftFromClaim(claimItem));
@@ -2133,9 +2182,9 @@ function ClaimModal({
     setPartsDraft((rows) =>
       rows.map((p) => {
         if (p.id !== partId) return p;
-        if (field === 'amount') {
+        if (field === 'amount' || field === 'quotePrice') {
           const s = String(raw).replace(/,/g, '');
-          if (s === '' || /^\d*\.?\d*$/.test(s)) return { ...p, amount: s };
+          if (s === '' || /^\d*\.?\d*$/.test(s)) return { ...p, [field]: s };
           return p;
         }
         return { ...p, [field]: raw };
@@ -2363,17 +2412,28 @@ function ClaimModal({
     }));
   };
 
+  const activeTabLabel = MODAL_TABS.find((item) => item.id === tab)?.label || 'Case file';
+  const quoteSummary =
+    quotePrice != null
+      ? formatAud(quotePrice)
+      : insuranceApprovedPrice != null
+        ? formatAud(insuranceApprovedPrice)
+        : 'Not set';
+  const sidebarNote = adminNote.trim()
+    ? `${adminNote.trim().slice(0, 110)}${adminNote.trim().length > 110 ? '...' : ''}`
+    : 'No admin note';
+
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-zinc-950/50 p-0 backdrop-blur-sm sm:items-center sm:p-6">
+    <div className="fixed inset-0 z-50 flex bg-zinc-950/55 p-0 backdrop-blur-sm lg:p-3">
       <div
-        className="flex max-h-[100dvh] w-full max-w-4xl flex-col overflow-hidden rounded-t-2xl border border-zinc-200/90 bg-white shadow-sheet-lg sm:max-h-[min(92vh,880px)] sm:rounded-2xl"
+        className="flex h-full min-h-0 w-full flex-col overflow-hidden border border-zinc-200/90 bg-zinc-50 shadow-sheet-lg lg:rounded-2xl"
         role="dialog"
         aria-modal="true"
         aria-labelledby="claim-modal-title"
       >
-        <div className="flex shrink-0 flex-col gap-3 border-b border-zinc-200/90 bg-gradient-to-b from-white to-zinc-50/90 px-4 py-3 sm:flex-row sm:items-start sm:justify-between sm:px-6 sm:py-4">
+        <div className="flex shrink-0 items-start justify-between gap-3 border-b border-zinc-200/90 bg-white px-3 py-3 sm:px-6 sm:py-4">
           <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2 text-2xs text-zinc-500">
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-2xs text-zinc-500">
               <span className="font-mono font-medium text-zinc-600" title="Member portal save code">
                 {claimRef(claimItem)}
               </span>
@@ -2392,23 +2452,25 @@ function ClaimModal({
               </span>
               <span>Claims</span>
               <ChevronRight className="h-3 w-3 text-zinc-300" aria-hidden />
-              <span>Review</span>
+              <span>{activeTabLabel}</span>
             </div>
-            <h2 id="claim-modal-title" className="font-display mt-1.5 truncate text-lg font-semibold tracking-tight text-zinc-950 sm:text-xl">
-              {claimItem.driverName}
+            <h2 id="claim-modal-title" className="font-display mt-1.5 truncate text-lg font-semibold tracking-tight text-zinc-950 sm:text-2xl">
+              {claimItem.driverName || 'Unnamed driver'}
             </h2>
-            <p className="mt-0.5 font-mono text-sm text-zinc-600">{claimItem.plateNumber}</p>
-            <p className="mt-2 max-w-prose text-sm leading-relaxed text-zinc-600">{claimItem.summary}</p>
-          </div>
-          <div className="flex shrink-0 items-center gap-2 sm:flex-col sm:items-end">
-            <div className="flex flex-wrap items-center justify-end gap-2">
-              {isModerator && (
-                <span className="rounded-lg border border-zinc-300/90 bg-zinc-100 px-2 py-0.5 text-2xs font-semibold uppercase tracking-wide text-zinc-800 shadow-inner">
-                  View only
-                </span>
-              )}
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span className="rounded-lg border border-zinc-200/90 bg-zinc-50 px-2 py-1 font-mono text-sm font-semibold text-zinc-800">
+                {claimItem.plateNumber || 'No plate'}
+              </span>
               <StatusBadge status={claimItem.status} />
             </div>
+            <p className="mt-3 hidden max-w-4xl text-sm leading-relaxed text-zinc-600 sm:block">{claimItem.summary || 'No summary recorded.'}</p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {isModerator && (
+              <span className="hidden rounded-lg border border-zinc-300/90 bg-zinc-100 px-2 py-0.5 text-2xs font-semibold uppercase tracking-wide text-zinc-800 shadow-inner sm:inline-flex">
+                View only
+              </span>
+            )}
             <button
               type="button"
               onClick={onClose}
@@ -2420,25 +2482,55 @@ function ClaimModal({
           </div>
         </div>
 
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div className="flex shrink-0 gap-1 border-b border-zinc-200/90 bg-white px-2 sm:gap-2 sm:px-4">
-            {MODAL_TABS.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setTab(item.id)}
-                className={`relative -mb-px border-b-2 px-3 py-3 text-2xs font-semibold uppercase tracking-wide transition ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 focus-visible:ring-offset-2 sm:px-4 sm:text-xs ${
-                  tab === item.id
-                    ? 'border-indigo-600 text-indigo-700'
-                    : 'border-transparent text-zinc-500 hover:text-zinc-800'
-                }`}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
+        <div className="grid shrink-0 grid-cols-2 gap-2 border-b border-zinc-200/90 bg-zinc-50/80 px-3 py-2.5 sm:px-6 lg:grid-cols-4 lg:py-3">
+          <CaseWorkspaceStat label="Submitted" value={claimItem.submittedAt} />
+          <CaseWorkspaceStat label="Incident" value={claimItem.dateOfIncident} />
+          <CaseWorkspaceStat label="Quote" value={quoteSummary} tone={quotePrice != null || insuranceApprovedPrice != null ? 'good' : 'warn'} />
+          <CaseWorkspaceStat label="Payment" value={paymentStatusLabel(paymentStatus)} tone={paymentStatus === 'completed' ? 'good' : 'warn'} />
+        </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin bg-zinc-50/40 px-4 py-4 sm:px-6 sm:py-5">
+        <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+          <nav className="shrink-0 border-b border-zinc-200/90 bg-white lg:w-64 lg:border-b-0 lg:border-r lg:px-4 lg:py-3">
+            <div className="flex items-center gap-1.5 px-2 py-2.5 lg:block lg:px-0 lg:py-0">
+              <button
+                type="button"
+                onClick={() => scrollTabRail(-1)}
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-600 shadow-sm active:scale-95 lg:hidden"
+                aria-label="Previous tabs"
+              >
+                <ChevronLeft className="h-4 w-4" strokeWidth={2} />
+              </button>
+              <div ref={tabRailRef} className="scrollbar-none flex min-w-0 flex-1 gap-2 overflow-x-auto lg:flex-col lg:overflow-visible">
+                {MODAL_TABS.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setTab(item.id)}
+                    data-active-tab={tab === item.id ? 'true' : undefined}
+                    className={`flex h-10 min-w-[8.5rem] max-w-[11rem] flex-none items-center justify-center gap-2 rounded-xl px-3 text-center text-xs font-semibold leading-tight transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 lg:h-auto lg:min-w-0 lg:max-w-none lg:justify-between lg:py-2.5 lg:text-left ${
+                      tab === item.id
+                        ? 'bg-indigo-600 text-white shadow-sm'
+                        : 'bg-zinc-50 text-zinc-600 hover:bg-zinc-100 hover:text-zinc-950 lg:bg-transparent'
+                    }`}
+                  >
+                    <span className="truncate">{item.label}</span>
+                    {tab === item.id ? <ChevronRight className="hidden h-4 w-4 lg:block" strokeWidth={2} /> : null}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={() => scrollTabRail(1)}
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-600 shadow-sm active:scale-95 lg:hidden"
+                aria-label="Next tabs"
+              >
+                <ChevronRight className="h-4 w-4" strokeWidth={2} />
+              </button>
+            </div>
+          </nav>
+
+          <main className="min-h-0 flex-1 overflow-y-auto scrollbar-thin bg-zinc-50/70 px-3 py-3 sm:px-6 sm:py-5">
+            <div className="mx-auto max-w-6xl">
             {tab === 'submission' && (
               <MemberSubmissionPanel
                 claimItem={claimItem}
@@ -3245,6 +3337,29 @@ function ClaimModal({
                                 </span>
                               )}
                             </PurchaseField>
+                            <PurchaseField label="Quote price (AUD)">
+                              {!isModerator ? (
+                                <input
+                                  type="text"
+                                  inputMode="decimal"
+                                  value={partAmountInputValue(p.quotePrice)}
+                                  onChange={(e) => updatePartDraft(p.id, 'quotePrice', e.target.value)}
+                                  placeholder="Manual quote"
+                                  className={`${purchaseInputClass} font-mono`}
+                                />
+                              ) : (
+                                <span className="font-mono text-sm text-zinc-900">
+                                  {partOptionalMoneyNumber(p.quotePrice) == null
+                                    ? '—'
+                                    : formatAud(partOptionalMoneyNumber(p.quotePrice))}
+                                </span>
+                              )}
+                              {partOptionalMoneyNumber(p.quotePrice) != null ? (
+                                <p className="mt-1 text-2xs text-zinc-500">
+                                  Difference: {formatAud(partAmountNumber(p.amount) - partOptionalMoneyNumber(p.quotePrice))}
+                                </p>
+                              ) : null}
+                            </PurchaseField>
                             <PurchaseField label="Order date">
                               {!isModerator ? (
                                 <input
@@ -3354,6 +3469,87 @@ function ClaimModal({
               </div>
             )}
           </div>
+          </main>
+
+          <aside className="hidden shrink-0 border-t border-zinc-200/90 bg-white px-4 py-4 lg:block lg:w-80 lg:overflow-y-auto lg:border-l lg:border-t-0 lg:px-5">
+            <div className="space-y-4">
+              <section className="rounded-xl border border-zinc-200/90 bg-zinc-50/70 p-3.5 shadow-inner">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Case snapshot</p>
+                    <p className="mt-1 text-sm font-semibold text-zinc-950">{claimRef(claimItem)}</p>
+                  </div>
+                  <StatusBadge status={claimItem.status} />
+                </div>
+                <div className="mt-3 divide-y divide-zinc-100">
+                  <CaseWorkspaceAsideRow label="Plate" value={claimItem.plateNumber} />
+                  <CaseWorkspaceAsideRow label="Driver" value={claimItem.driverName} />
+                  <CaseWorkspaceAsideRow label="Incident" value={claimItem.dateOfIncident} />
+                  <CaseWorkspaceAsideRow label="PDFs" value={caseFiles.length ? `${caseFiles.length} file(s)` : 'None'} />
+                  <CaseWorkspaceAsideRow label="Purchase" value={partsSummaryText || 'No lines'} />
+                </div>
+              </section>
+
+              <section className="rounded-xl border border-zinc-200/90 bg-white p-3.5 shadow-inner">
+                <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Financials</p>
+                <div className="mt-3 grid gap-2">
+                  <CaseWorkspaceStat label="Repair quote" value={quotePrice != null ? formatAud(quotePrice) : 'Not set'} tone={quotePrice != null ? 'good' : 'warn'} />
+                  <CaseWorkspaceStat label="Insurance approved" value={insuranceApprovedPrice != null ? formatAud(insuranceApprovedPrice) : 'Not set'} tone={insuranceApprovedPrice != null ? 'good' : 'warn'} />
+                  <CaseWorkspaceStat label="Payment" value={paymentStatusLabel(paymentStatus)} tone={paymentStatus === 'completed' ? 'good' : 'warn'} />
+                </div>
+              </section>
+
+              <section className="rounded-xl border border-zinc-200/90 bg-white p-3.5 shadow-inner">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Admin note</p>
+                  {!isModerator ? (
+                    <button
+                      type="button"
+                      onClick={() => setTab('quotes')}
+                      className="text-2xs font-semibold text-indigo-700 hover:text-indigo-900"
+                    >
+                      Edit
+                    </button>
+                  ) : null}
+                </div>
+                <p className="mt-2 text-sm leading-relaxed text-zinc-700">{sidebarNote}</p>
+              </section>
+
+              {!isModerator ? (
+                <section className="rounded-xl border border-zinc-200/90 bg-zinc-50/70 p-3.5 shadow-inner">
+                  <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Quick actions</p>
+                  <div className="mt-3 grid gap-2">
+                    <button
+                      type="button"
+                      onClick={onExport}
+                      className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl border border-zinc-200/90 bg-white px-3 text-xs font-semibold text-zinc-800 shadow-sm transition hover:bg-zinc-50"
+                    >
+                      <Download className="h-3.5 w-3.5" strokeWidth={2} />
+                      Export PDF
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTab('submission')}
+                      className="inline-flex h-10 items-center justify-center rounded-xl border border-indigo-200 bg-indigo-50 px-3 text-xs font-semibold text-indigo-900 transition hover:bg-indigo-100"
+                    >
+                      Review submission
+                    </button>
+                    {onRequestDelete ? (
+                      <button
+                        type="button"
+                        onClick={openDeleteDialog}
+                        className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3 text-xs font-semibold text-rose-800 transition hover:bg-rose-100"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" strokeWidth={2} />
+                        Delete claim
+                      </button>
+                    ) : null}
+                  </div>
+                </section>
+              ) : null}
+            </div>
+          </aside>
+        </div>
 
           {isModerator ? (
             <div className="flex shrink-0 flex-col gap-3 border-t border-zinc-200/90 bg-zinc-50/95 px-4 py-4 backdrop-blur-sm sm:flex-row sm:items-center sm:justify-between sm:px-6">
@@ -3371,8 +3567,8 @@ function ClaimModal({
               </button>
             </div>
           ) : (
-            <div className="flex shrink-0 flex-col gap-2 border-t border-zinc-200/90 bg-white/95 px-4 py-3 shadow-[0_-8px_24px_-12px_rgba(0,0,0,0.08)] backdrop-blur-md sm:px-6">
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex shrink-0 flex-col gap-2 border-t border-zinc-200/90 bg-white/95 px-3 py-2.5 shadow-[0_-8px_24px_-12px_rgba(0,0,0,0.08)] backdrop-blur-md sm:px-6 sm:py-3">
+              <div className="hidden flex-col gap-2 sm:flex sm:flex-row sm:items-center sm:justify-between">
                 {onRequestDelete ? (
                   <button
                     type="button"
@@ -3389,11 +3585,11 @@ function ClaimModal({
                   Use Save or Update on each section (insurance quote, purchase, admin note) to persist changes.
                 </p>
               </div>
-              <div className="flex flex-wrap gap-2 sm:justify-end">
+              <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-thin sm:flex-wrap sm:justify-end sm:overflow-visible sm:pb-0">
                 <button
                   type="button"
                   onClick={onExport}
-                  className="inline-flex h-10 flex-1 items-center justify-center gap-1.5 rounded-xl border border-zinc-200/90 bg-white px-3 text-xs font-semibold text-zinc-800 shadow-sm transition hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 sm:flex-none"
+                  className="inline-flex h-10 min-w-[8rem] flex-none items-center justify-center gap-1.5 rounded-xl border border-zinc-200/90 bg-white px-3 text-xs font-semibold text-zinc-800 shadow-sm transition hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80"
                 >
                   <Download className="h-3.5 w-3.5" strokeWidth={2} />
                   Export PDF
@@ -3403,28 +3599,28 @@ function ClaimModal({
                     <button
                       type="button"
                       onClick={onReject}
-                      className="h-10 flex-1 rounded-xl border border-rose-200/90 bg-rose-50 px-3 text-xs font-semibold text-rose-900 transition hover:bg-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/80 sm:flex-none"
+                      className="h-10 min-w-[6.5rem] flex-none rounded-xl border border-rose-200/90 bg-rose-50 px-3 text-xs font-semibold text-rose-900 transition hover:bg-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/80"
                     >
                       Reject
                     </button>
                     <button
                       type="button"
                       onClick={onLitigation}
-                      className="h-10 flex-1 rounded-xl border border-violet-200/90 bg-violet-50 px-3 text-xs font-semibold text-violet-900 transition hover:bg-violet-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/80 sm:flex-none"
+                      className="h-10 min-w-[7.25rem] flex-none rounded-xl border border-violet-200/90 bg-violet-50 px-3 text-xs font-semibold text-violet-900 transition hover:bg-violet-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/80"
                     >
                       Litigation
                     </button>
                     <button
                       type="button"
                       onClick={onRecovery}
-                      className="h-10 flex-1 rounded-xl border border-sky-200/90 bg-sky-50 px-3 text-xs font-semibold text-sky-900 transition hover:bg-sky-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/80 sm:flex-none"
+                      className="h-10 min-w-[7rem] flex-none rounded-xl border border-sky-200/90 bg-sky-50 px-3 text-xs font-semibold text-sky-900 transition hover:bg-sky-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/80"
                     >
                       Recovery
                     </button>
                     <button
                       type="button"
                       onClick={onApprove}
-                      className="h-10 flex-1 rounded-xl bg-emerald-600 px-3 text-xs font-semibold text-white shadow-md shadow-emerald-900/10 transition hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/80 sm:flex-none"
+                      className="h-10 min-w-[8rem] flex-none rounded-xl bg-emerald-600 px-3 text-xs font-semibold text-white shadow-md shadow-emerald-900/10 transition hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/80"
                     >
                       Approve claim
                     </button>
@@ -3434,7 +3630,7 @@ function ClaimModal({
                     <button
                       type="button"
                       onClick={onReopen}
-                      className="h-10 flex-1 rounded-xl border border-zinc-300/90 bg-zinc-100 px-3 text-xs font-semibold text-zinc-800 transition hover:bg-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 sm:flex-none"
+                      className="h-10 min-w-[12rem] flex-none rounded-xl border border-zinc-300/90 bg-zinc-100 px-3 text-xs font-semibold text-zinc-800 transition hover:bg-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80"
                     >
                       Return to pending review
                     </button>
@@ -3442,7 +3638,7 @@ function ClaimModal({
                       <button
                         type="button"
                         onClick={onLitigation}
-                        className="h-10 flex-1 rounded-xl border border-violet-200/90 bg-violet-50 px-3 text-xs font-semibold text-violet-900 transition hover:bg-violet-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/80 sm:flex-none"
+                        className="h-10 min-w-[7.25rem] flex-none rounded-xl border border-violet-200/90 bg-violet-50 px-3 text-xs font-semibold text-violet-900 transition hover:bg-violet-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/80"
                       >
                         Litigation
                       </button>
@@ -3451,7 +3647,7 @@ function ClaimModal({
                       <button
                         type="button"
                         onClick={onRecovery}
-                        className="h-10 flex-1 rounded-xl border border-sky-200/90 bg-sky-50 px-3 text-xs font-semibold text-sky-900 transition hover:bg-sky-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/80 sm:flex-none"
+                        className="h-10 min-w-[7rem] flex-none rounded-xl border border-sky-200/90 bg-sky-50 px-3 text-xs font-semibold text-sky-900 transition hover:bg-sky-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/80"
                       >
                         Recovery
                       </button>
@@ -3461,7 +3657,6 @@ function ClaimModal({
               </div>
             </div>
           )}
-        </div>
       </div>
     </div>
   );
