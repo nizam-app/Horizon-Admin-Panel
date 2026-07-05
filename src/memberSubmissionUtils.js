@@ -140,7 +140,7 @@ export function mergeAttachmentLists(...lists) {
     if (!Array.isArray(list)) continue;
     for (const file of list) {
       if (!file || typeof file !== 'object') continue;
-      const key = file.id || `${file.name || 'file'}:${file.dataUrl?.length || 0}:${file.source || ''}`;
+      const key = file.id || `${file.name || 'file'}:${file.dataUrl?.length || file.url?.length || file.fileUrl?.length || 0}:${file.source || ''}`;
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(file);

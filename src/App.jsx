@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
+  AlertTriangle,
   Banknote,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  ClipboardCheck,
+  Clock3,
   Download,
   FileCheck2,
   FileSearch,
@@ -11,9 +14,7 @@ import {
   Gavel,
   Inbox,
   Landmark,
-  LayoutDashboard,
   LogOut,
-  MapPinned,
   Package,
   Plus,
   Search,
@@ -29,7 +30,12 @@ import * as api from './api.js';
 import { DamageDiagramViewer } from './DamageDiagramViewer.jsx';
 import { MemberSubmissionPanel } from './MemberSubmissionPanel.jsx';
 import { buildClaimExportHtml, openClaimExportPrint } from './claimExportHtml.js';
-import { resolveDamageDiagramFromDamage } from './memberSubmissionUtils.js';
+import {
+  mergeAttachmentLists,
+  resolveChecklistFlag,
+  resolveDamageDiagramFromDamage,
+  submissionSource,
+} from './memberSubmissionUtils.js';
 
 /** Payment status is only `pending` or `completed`; maps legacy stored values. */
 function normalizePaymentStatus(raw) {
@@ -57,21 +63,6 @@ const detailFields = [
   { label: 'Other Parties', getter: (data) => (data.otherParties?.length ?? 0).toString() },
 ];
 
-const queueHighlights = [
-  {
-    title: 'Review posture',
-    text: 'Prioritize incomplete claims first, then move to liability confirmation and workshop intake.',
-  },
-  {
-    title: 'Operational workflow',
-    text: 'Open a claim, validate details, request documents if needed, then approve or reject.',
-  },
-  {
-    title: 'Export handoff',
-    text: 'Use the export action when a printable summary is needed for insurers or workshop files.',
-  },
-];
-
 const CLAIM_STATUSES = ['Pending Review', 'Approved', 'Rejected', 'Litigation', 'Recovery'];
 const STATUS_OPTIONS = ['All', ...CLAIM_STATUSES];
 
@@ -92,8 +83,9 @@ const PART_STATUS_OPTIONS = [
 ];
 
 const MODAL_TABS = [
-  { id: 'overview', label: 'Overview' },
+  { id: 'overview', label: 'Summary' },
   { id: 'submission', label: 'Member submission' },
+  { id: 'documents', label: 'Documents' },
   { id: 'records', label: 'Vehicle & incident' },
   { id: 'parties', label: 'Parties & witnesses' },
   { id: 'quotes', label: 'Insurance quote' },
@@ -745,6 +737,143 @@ function paymentStatusLabel(raw) {
   return PAYMENT_STATUS_OPTIONS.find((o) => o.id === id)?.label ?? 'Pending';
 }
 
+function yesish(raw) {
+  const s = String(raw ?? '').trim().toLowerCase();
+  return raw === true || ['yes', 'y', 'true', '1', 'selected'].includes(s);
+}
+
+function hasValue(raw) {
+  if (raw == null) return false;
+  if (Array.isArray(raw)) return raw.length > 0;
+  if (typeof raw === 'object') return Object.values(raw).some(hasValue);
+  return String(raw).trim().length > 0;
+}
+
+function claimDocumentChecklist(item) {
+  const { payload, data, src, submission } = submissionSource(item);
+  const checklist = { ...(submission.checklist || {}), ...(src.checklist || {}) };
+  const damage = { ...(data.damage || {}), ...(payload?.damage || {}) };
+  const diagram = damage.diagram || {};
+  const damageResolved = resolveDamageDiagramFromDamage(damage);
+  const licenseFront = mergeAttachmentLists(src.driverLicenseFrontAttachments, submission.driverLicenseFrontAttachments);
+  const licenseBack = mergeAttachmentLists(src.driverLicenseBackAttachments, submission.driverLicenseBackAttachments);
+  const taxiAuthority = mergeAttachmentLists(src.taxiAuthorityAttachments, submission.taxiAuthorityAttachments);
+  const registration = mergeAttachmentLists(src.registrationAttachments, submission.registrationAttachments);
+  const scenePhotos = mergeAttachmentLists(diagram.scenePhotos);
+  const detailPhotos = mergeAttachmentLists(diagram.detailPhotos);
+  const sketchUploads = mergeAttachmentLists(src.accidentSketch?.attachments);
+  const policeReported = yesish(data.driver?.policeReported || src.driver?.policeReported);
+  const signatureDataUrl = src.declaration?.signatureDataUrl || data.declaration?.signatureDataUrl;
+  const sketchImage = src.accidentSketch?.diagramDataUrl;
+
+  const rows = [
+    {
+      id: 'license',
+      label: 'Driver licence',
+      required: true,
+      complete: licenseFront.length > 0 && licenseBack.length > 0,
+      detail: [licenseFront.length ? 'front' : '', licenseBack.length ? 'back' : ''].filter(Boolean).join(' + '),
+    },
+    {
+      id: 'registration',
+      label: 'Registration',
+      required: true,
+      complete: registration.length > 0,
+      detail: registration.length ? `${registration.length} file(s)` : '',
+    },
+    {
+      id: 'damagePhotos',
+      label: 'Damage photos',
+      required: true,
+      complete: scenePhotos.length > 0 || detailPhotos.length > 0,
+      detail: scenePhotos.length || detailPhotos.length ? `${scenePhotos.length + detailPhotos.length} photo(s)` : '',
+    },
+    {
+      id: 'damageMap',
+      label: 'Damage diagram',
+      required: true,
+      complete: damageResolved.markers.length > 0 || damageResolved.strokes.length > 0,
+      detail:
+        damageResolved.markers.length || damageResolved.strokes.length
+          ? `${damageResolved.markers.length} marker(s), ${damageResolved.strokes.length} drawing(s)`
+          : '',
+    },
+    {
+      id: 'signature',
+      label: 'Declaration signature',
+      required: true,
+      complete: typeof signatureDataUrl === 'string' && signatureDataUrl.startsWith('data:image/'),
+      detail: signatureDataUrl ? 'signed' : '',
+    },
+    {
+      id: 'policeReport',
+      label: 'Police report',
+      required: policeReported,
+      complete: !policeReported || resolveChecklistFlag(checklist, 'policeReport'),
+      detail: policeReported ? 'reported to police' : 'not required',
+    },
+    {
+      id: 'taxiAuthority',
+      label: 'Taxi authority',
+      required: resolveChecklistFlag(checklist, 'taxiAuthority', [taxiAuthority]),
+      complete: !resolveChecklistFlag(checklist, 'taxiAuthority', [taxiAuthority]) || taxiAuthority.length > 0,
+      detail: taxiAuthority.length ? `${taxiAuthority.length} file(s)` : '',
+    },
+    {
+      id: 'accidentSketch',
+      label: 'Accident sketch',
+      required: false,
+      complete: Boolean(sketchImage || sketchUploads.length),
+      detail: sketchImage ? 'drawing attached' : sketchUploads.length ? `${sketchUploads.length} upload(s)` : 'optional',
+    },
+  ];
+
+  return rows.map((row) => ({
+    ...row,
+    missing: row.required && !row.complete,
+  }));
+}
+
+function buildClaimSignals(item) {
+  const { data, src } = submissionSource(item);
+  const documents = claimDocumentChecklist(item);
+  const missingDocs = documents.filter((row) => row.missing);
+  const risks = [];
+  const actions = [];
+  const paymentStatus = normalizePaymentStatus(item?.paymentStatus);
+  const otherParties = Array.isArray(src.otherParties) ? src.otherParties : Array.isArray(data.otherParties) ? data.otherParties : [];
+  const witnesses = data.witnessDetails || {};
+
+  if (otherParties.length > 0) risks.push(`${otherParties.length} other party${otherParties.length === 1 ? '' : 'ies'}`);
+  if (yesish(data.driver?.admittedLiability || src.driver?.admittedLiability)) risks.push('Driver admitted liability');
+  if (yesish(data.driver?.otherDriverAdmittedLiability || src.driver?.otherDriverAdmittedLiability)) risks.push('Other driver admitted liability');
+  if (yesish(data.driver?.policeReported || src.driver?.policeReported)) risks.push('Police reported');
+  if (yesish(data.damage?.towed || src.damage?.towed)) risks.push('Vehicle towed');
+  if (hasValue(witnesses)) risks.push('Witness recorded');
+
+  if (missingDocs.length) actions.push(`Request ${missingDocs[0].label.toLowerCase()}`);
+  if (item?.status === 'Pending Review' && !missingDocs.length) actions.push('Review and set disposition');
+  if (item?.quotePrice == null) actions.push('Set repair quote');
+  if (item?.insuranceApprovedPrice == null) actions.push('Record insurer amount');
+  if (paymentStatus === 'pending') actions.push('Confirm payment');
+
+  const attentionLevel =
+    missingDocs.length > 0 || risks.length > 2
+      ? 'high'
+      : actions.length > 0 || risks.length > 0
+        ? 'medium'
+        : 'low';
+
+  return {
+    documents,
+    missingDocs,
+    risks,
+    actions,
+    nextAction: actions[0] || 'No immediate action',
+    attentionLevel,
+  };
+}
+
 function escapeHtml(s) {
   return String(s ?? '')
     .replace(/&/g, '&amp;')
@@ -1352,14 +1481,14 @@ function App() {
         </aside>
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <header className="sticky top-0 z-10 border-b border-zinc-200/80 bg-white/70 shadow-lift backdrop-blur-xl supports-[backdrop-filter]:bg-white/55">
-            <div className="flex h-14 items-center justify-between gap-4 px-4 sm:px-5 lg:px-8">
+          <header className="sticky top-0 z-10 border-b border-zinc-200/80 bg-white/80 shadow-sm backdrop-blur-xl supports-[backdrop-filter]:bg-white/65">
+            <div className="flex h-11 items-center justify-between gap-4 px-3 sm:px-5 lg:px-8">
               <div className="flex min-w-0 flex-wrap items-center gap-2 text-2xs text-zinc-500 sm:gap-3">
                 <span className="hidden font-semibold uppercase tracking-wider text-zinc-400 sm:inline">Operations</span>
                 <ChevronRight className="hidden h-3 w-3 shrink-0 text-zinc-300 sm:inline" aria-hidden />
                 <span className="truncate font-medium text-zinc-800">Claims queue</span>
                 <span className="hidden h-3 w-px shrink-0 bg-zinc-200 sm:inline" aria-hidden />
-                <span className="hidden truncate text-zinc-500 sm:inline">Review and disposition</span>
+                <span className="hidden truncate text-zinc-500 md:inline">Review</span>
                 <span className="rounded-lg border border-zinc-200/90 bg-zinc-50 px-2 py-0.5 font-medium text-zinc-800 shadow-sm">
                   {roleMeta.label}
                 </span>
@@ -1375,32 +1504,7 @@ function App() {
             </div>
           </header>
 
-          <div className="border-b border-zinc-200/70 bg-gradient-to-b from-white via-white to-zinc-50/90 px-4 py-6 sm:px-5 lg:px-8">
-            <div className="flex flex-col gap-1 lg:flex-row lg:items-end lg:justify-between">
-              <div>
-                <h1 className="font-display text-2xl font-semibold tracking-tight text-zinc-950 sm:text-[1.65rem] sm:leading-tight">
-                  Claims management
-                </h1>
-                <p className="mt-2 max-w-2xl text-sm leading-relaxed text-zinc-600">
-                  {isModerator
-                    ? 'Read-only access: use the queue and case file to review every field (overview, vehicle and incident, parties and witnesses). You cannot change claim status, request documents on behalf of the system, or export from this role.'
-                    : 'Review, approve, and export accident claims. Administrators may change claim disposition.'}
-                </p>
-              </div>
-              <dl className="mt-4 flex flex-wrap gap-x-8 gap-y-1 text-2xs text-zinc-500 lg:mt-0 lg:justify-end">
-                <div className="flex gap-1.5">
-                  <dt className="text-zinc-400">Portfolio</dt>
-                  <dd className="font-mono font-semibold text-zinc-800">{metrics.total} open</dd>
-                </div>
-                <div className="flex gap-1.5">
-                  <dt className="text-zinc-400">Filtered</dt>
-                  <dd className="font-mono font-semibold text-zinc-800">{filteredClaims.length} rows</dd>
-                </div>
-              </dl>
-            </div>
-          </div>
-
-          <main className="flex-1 overflow-auto scrollbar-thin px-4 py-5 sm:px-5 lg:px-8 lg:py-7">
+          <main className="flex-1 overflow-auto scrollbar-thin px-3 py-3 sm:px-5 lg:px-8 lg:py-4">
             <>
             {claimsError ? (
               <div className="mb-5 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">{claimsError}</div>
@@ -1418,7 +1522,7 @@ function App() {
                 </p>
               </div>
             )}
-            <section className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6 sm:gap-4">
+            <section className="hidden">
               <MetricCard
                 title="Total claims"
                 value={metrics.total}
@@ -1463,15 +1567,26 @@ function App() {
               />
             </section>
 
-            <section className="mt-2 grid gap-6 xl:grid-cols-[1fr_300px]">
+            <section>
               <div className="flex min-w-0 flex-col overflow-hidden rounded-2xl border border-zinc-200/90 bg-white shadow-card">
-                <div className="border-b border-zinc-100 px-4 py-4 sm:px-6">
-                  <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                    <div>
-                      <h2 className="font-display text-base font-semibold tracking-tight text-zinc-950">Submitted claims</h2>
-                      <p className="mt-1 text-sm text-zinc-600">Search and filter the intake queue. Select a row to open the case file.</p>
+                <div className="border-b border-zinc-100 px-3 py-3 sm:px-5">
+                  <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+                    <div className="flex min-w-0 flex-col gap-2">
+                      <div className="flex min-w-0 flex-wrap items-center gap-2">
+                        <h1 className="font-display text-base font-semibold tracking-tight text-zinc-950">Claims queue</h1>
+                        <span className="hidden h-4 w-px bg-zinc-200 sm:inline-block" aria-hidden />
+                        <QueueMetricChip label="Total" value={metrics.total} />
+                        <QueueMetricChip label="Pending" value={metrics.pending} tone="warn" />
+                        <QueueMetricChip label="Approved" value={metrics.approved} tone="good" />
+                        <QueueMetricChip label="Filtered" value={filteredClaims.length} />
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {metrics.rejected ? <QueueMetricChip label="Rejected" value={metrics.rejected} tone="danger" /> : null}
+                        {metrics.litigation ? <QueueMetricChip label="Litigation" value={metrics.litigation} tone="warn" /> : null}
+                        {metrics.recovery ? <QueueMetricChip label="Recovery" value={metrics.recovery} /> : null}
+                      </div>
                     </div>
-                    <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center lg:w-auto lg:max-w-xl">
+                    <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center xl:w-auto xl:max-w-3xl">
                       <label className="group relative min-w-0 flex-1 sm:max-w-xs lg:max-w-[280px]">
                         <span className="sr-only">Search claims</span>
                         <Search
@@ -1509,7 +1624,7 @@ function App() {
                     </div>
                   </div>
 
-                  <div className="mt-5 grid gap-2 border-t border-zinc-100 pt-4 sm:grid-cols-3">
+                  <div className="hidden">
                     <QueueStat label="Awaiting action" value={metrics.pending} />
                     <QueueStat label="In view" value={filteredClaims.length} />
                     <QueueStat label="High priority" value={claims.filter((item) => item.priority === 'High').length} />
@@ -1517,7 +1632,7 @@ function App() {
                 </div>
 
                 <div className="overflow-x-auto scrollbar-thin">
-                  <table className="min-w-[800px] w-full border-collapse text-left text-[13px]">
+                  <table className="min-w-[1040px] w-full border-collapse text-left text-[13px]">
                     <thead>
                       <tr className="border-b border-zinc-200 bg-zinc-50/95">
                         <th className="w-10 px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">#</th>
@@ -1526,6 +1641,7 @@ function App() {
                         </th>
                         <th className="min-w-[140px] px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Plate</th>
                         <th className="min-w-[160px] px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Driver</th>
+                        <th className="min-w-[180px] px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Needs attention</th>
                         <th className="whitespace-nowrap px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Submitted</th>
                         <th className="whitespace-nowrap px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Incident</th>
                         <th className="px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Payment</th>
@@ -1539,6 +1655,7 @@ function App() {
                     <tbody className="divide-y divide-zinc-100">
                       {filteredClaims.map((item, index) => {
                         const active = selectedClaim?.id === item.id;
+                        const signals = buildClaimSignals(item);
                         return (
                           <tr
                             key={item.id}
@@ -1592,6 +1709,9 @@ function App() {
                               <p className="truncate font-medium text-zinc-900">{item.driverName}</p>
                               <p className="truncate text-2xs text-zinc-500">{item.summary}</p>
                             </td>
+                            <td className="px-3 py-2.5">
+                              <AttentionSummary signals={signals} compact />
+                            </td>
                             <td className="whitespace-nowrap px-3 py-2.5 font-mono text-2xs tabular-nums text-zinc-600">
                               {item.submittedAt}
                             </td>
@@ -1628,7 +1748,7 @@ function App() {
                       })}
                       {!filteredClaims.length && (
                         <tr>
-                          <td colSpan={10} className="px-4 py-12">
+                          <td colSpan={11} className="px-4 py-12">
                             <div className="mx-auto max-w-md rounded-xl border border-dashed border-zinc-200 bg-zinc-50/80 px-5 py-8 text-center shadow-inner">
                               <p className="text-sm font-semibold text-zinc-900">No matching claims</p>
                               <p className="mt-1.5 text-sm text-zinc-600">
@@ -1642,82 +1762,6 @@ function App() {
                   </table>
                 </div>
               </div>
-
-              <aside className="flex min-w-0 flex-col gap-4">
-                <div className="rounded-2xl border border-zinc-200/90 bg-white p-5 shadow-card">
-                  <div className="flex gap-3">
-                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-zinc-200/90 bg-zinc-50 text-zinc-700 shadow-inner">
-                      <Shield className="h-4 w-4" strokeWidth={2} />
-                    </span>
-                    <div>
-                      <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Policy</p>
-                      <p className="mt-1 text-sm leading-snug text-zinc-600">
-                        {isModerator
-                          ? 'Moderators have full visibility into claim records for oversight and triage. Disposition, document requests, and exports are administrator-only.'
-                          : 'Use documented criteria when changing status. Export generates an insurer-ready print layout.'}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-zinc-200/90 bg-white p-5 shadow-card">
-                  <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Workflow</p>
-                  <ol className="mt-3 space-y-3">
-                    {(isModerator
-                      ? ['Scan the queue and filters', 'Open a row to read the full case file (all tabs)']
-                      : ['Validate intake data', 'Confirm liability signals', 'Record disposition', 'Export if required']
-                    ).map((step, i) => (
-                      <li key={step} className="flex gap-3 text-sm text-zinc-700">
-                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg border border-zinc-200/90 bg-zinc-50 font-mono text-2xs font-semibold text-zinc-600 shadow-inner">
-                          {i + 1}
-                        </span>
-                        <span className="pt-0.5 leading-snug">{step}</span>
-                      </li>
-                    ))}
-                  </ol>
-                </div>
-
-                <div className="rounded-2xl border border-zinc-200/90 bg-white p-5 shadow-card">
-                  <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Guidance</p>
-                  <ul className="mt-3 space-y-3">
-                    <AdminHint
-                      icon={LayoutDashboard}
-                      title="Queue hygiene"
-                      text={isModerator ? 'Use search and status filters to narrow the list; all columns remain visible.' : 'Process incoming claims and keep the queue moving.'}
-                    />
-                    <AdminHint
-                      icon={MapPinned}
-                      title="Case file"
-                      text={
-                        isModerator
-                          ? 'Open any row: Overview, Vehicle & incident, and Parties & witnesses match the administrator view (read-only).'
-                          : 'Open any row for structured fields and disposition actions.'
-                      }
-                    />
-                    {!isModerator && (
-                      <AdminHint icon={Download} title="Print handoff" text="Export for workshop or insurer packets." />
-                    )}
-                  </ul>
-                </div>
-
-                <div className="rounded-2xl border border-zinc-200/90 bg-gradient-to-b from-zinc-50/90 to-white p-5 shadow-inner">
-                  <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Checklist</p>
-                  {isModerator ? (
-                    <p className="mt-2.5 text-sm leading-relaxed text-zinc-700">
-                      For status changes, document requests, or PDF exports, ask an <span className="font-medium text-zinc-900">Administrator</span> to act in this workspace.
-                    </p>
-                  ) : (
-                    <ul className="mt-2.5 space-y-2">
-                      {queueHighlights.map((item) => (
-                        <li key={item.title} className="border-l-2 border-indigo-300/80 pl-3 text-sm text-zinc-700">
-                          <span className="font-medium text-zinc-900">{item.title}.</span>{' '}
-                          <span className="text-zinc-600">{item.text}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              </aside>
             </section>
               </>
           </main>
@@ -1765,31 +1809,24 @@ function App() {
   );
 }
 
-function MetricCard({ title, value, caption, icon: Icon, tone }) {
-  const tones = {
-    slate: 'border-zinc-200/90 bg-white text-zinc-700',
-    amber: 'border-amber-200/80 bg-amber-50/50 text-amber-900',
-    emerald: 'border-emerald-200/80 bg-emerald-50/50 text-emerald-900',
-    rose: 'border-rose-200/80 bg-rose-50/50 text-rose-900',
-    violet: 'border-violet-200/80 bg-violet-50/50 text-violet-900',
-    sky: 'border-sky-200/80 bg-sky-50/50 text-sky-900',
-  };
+function MetricCard() {
+  return null;
+}
 
+function QueueMetricChip({ label, value, tone = 'default' }) {
+  const toneClass =
+    tone === 'warn'
+      ? 'border-amber-200 bg-amber-50 text-amber-950'
+      : tone === 'good'
+        ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+        : tone === 'danger'
+          ? 'border-rose-200 bg-rose-50 text-rose-900'
+          : 'border-zinc-200 bg-white text-zinc-800';
   return (
-    <div
-      className={`rounded-2xl border px-3 py-3 shadow-card transition ease-out hover:shadow-card-hover sm:px-4 sm:py-4 ${tones[tone]}`}
-    >
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">{title}</p>
-          <p className="mt-1.5 font-mono text-2xl font-semibold tabular-nums tracking-tight text-zinc-950">{value}</p>
-          <p className="mt-1 text-2xs leading-relaxed text-zinc-600">{caption}</p>
-        </div>
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-zinc-200/80 bg-zinc-50/80 text-zinc-600 shadow-inner">
-          <Icon className="h-4 w-4" strokeWidth={2} />
-        </span>
-      </div>
-    </div>
+    <span className={`inline-flex h-8 items-center gap-2 rounded-lg border px-2.5 text-2xs font-semibold ${toneClass}`}>
+      <span className="text-zinc-500">{label}</span>
+      <span className="font-mono text-sm tabular-nums text-zinc-950">{value}</span>
+    </span>
   );
 }
 
@@ -1843,6 +1880,73 @@ function PaymentStatusBadge({ status }) {
   );
 }
 
+function AttentionSummary({ signals, compact = false }) {
+  const level = signals?.attentionLevel || 'low';
+  const styles =
+    level === 'high'
+      ? 'border-rose-200 bg-rose-50 text-rose-900'
+      : level === 'medium'
+        ? 'border-amber-200 bg-amber-50 text-amber-950'
+        : 'border-emerald-200 bg-emerald-50 text-emerald-900';
+  const Icon = level === 'low' ? CheckCircle2 : AlertTriangle;
+  const missingCount = signals?.missingDocs?.length || 0;
+  const riskCount = signals?.risks?.length || 0;
+
+  return (
+    <div className="min-w-0">
+      <span className={`inline-flex max-w-full items-center gap-1.5 rounded-lg border px-2 py-1 text-2xs font-semibold ${styles}`}>
+        <Icon className="h-3.5 w-3.5 shrink-0" strokeWidth={2} />
+        <span className="truncate">{signals?.nextAction || 'No immediate action'}</span>
+      </span>
+      {!compact ? null : (
+        <p className="mt-1 truncate text-2xs text-zinc-500">
+          {missingCount ? `${missingCount} missing` : 'Docs ok'}
+          {riskCount ? ` · ${riskCount} flag${riskCount === 1 ? '' : 's'}` : ''}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function DocumentChecklist({ documents }) {
+  const rows = Array.isArray(documents) ? documents : [];
+  return (
+    <div className="overflow-hidden rounded-xl border border-zinc-200/90 bg-white shadow-inner">
+      <div className="flex items-center justify-between gap-3 border-b border-zinc-100 bg-zinc-50/50 px-4 py-2.5">
+        <h3 className="text-[13px] font-semibold text-zinc-900">Document completeness</h3>
+        <span className="text-2xs font-semibold text-zinc-500">
+          {rows.filter((row) => row.required && row.complete).length}/{rows.filter((row) => row.required).length} required
+        </span>
+      </div>
+      <div className="divide-y divide-zinc-100">
+        {rows.map((row) => (
+          <div key={row.id} className="flex items-center justify-between gap-3 px-4 py-3">
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-zinc-900">{row.label}</p>
+              <p className="mt-0.5 truncate text-2xs text-zinc-500">
+                {row.required ? 'Required' : 'Optional'}
+                {row.detail ? ` · ${row.detail}` : ''}
+              </p>
+            </div>
+            <span
+              className={`inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-2 py-1 text-2xs font-semibold ${
+                row.complete
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                  : row.required
+                    ? 'border-rose-200 bg-rose-50 text-rose-900'
+                    : 'border-zinc-200 bg-zinc-50 text-zinc-600'
+              }`}
+            >
+              {row.complete ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Clock3 className="h-3.5 w-3.5" />}
+              {row.complete ? 'Complete' : row.required ? 'Missing' : 'Optional'}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function PartStatusBadge({ status }) {
   const id = status === 'completed' ? 'completed' : 'pending';
   const styles =
@@ -1865,20 +1969,6 @@ function QueueStat({ label, value }) {
       <span className="text-2xs font-medium uppercase tracking-wide text-zinc-500">{label}</span>
       <span className="font-mono text-sm font-semibold tabular-nums text-zinc-900">{value}</span>
     </div>
-  );
-}
-
-function AdminHint({ icon: Icon, title, text }) {
-  return (
-    <li className="flex gap-2.5">
-      <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-zinc-200/90 bg-zinc-50 text-zinc-600 shadow-inner">
-        <Icon className="h-3.5 w-3.5" strokeWidth={2} />
-      </span>
-      <div className="min-w-0">
-        <p className="text-sm font-medium text-zinc-900">{title}</p>
-        <p className="mt-0.5 text-2xs leading-relaxed text-zinc-600">{text}</p>
-      </div>
-    </li>
   );
 }
 
@@ -2152,6 +2242,7 @@ function ClaimModal({
   const damageDiagramResolved = resolveDamageDiagramFromDamage(mergedDamage);
   const damageMarkerCount = damageDiagramResolved.markers.length;
   const damageStrokeCount = damageDiagramResolved.strokes.length;
+  const caseSignals = buildClaimSignals(claimItem);
 
   const paymentStatus = paymentStatusDraft;
   const adminNote = claimItem.adminNote ?? '';
@@ -2541,6 +2632,107 @@ function ClaimModal({
 
             {tab === 'overview' && (
               <div className="space-y-4">
+                <section className="rounded-xl border border-indigo-200/80 bg-gradient-to-br from-indigo-50/90 via-white to-white p-4 shadow-inner sm:p-5">
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-indigo-200 bg-white text-indigo-700 shadow-inner">
+                          <ClipboardCheck className="h-4 w-4" strokeWidth={2} />
+                        </span>
+                        <div>
+                          <p className="text-2xs font-semibold uppercase tracking-wider text-indigo-900">Case command center</p>
+                          <h3 className="mt-0.5 text-lg font-semibold tracking-tight text-zinc-950">
+                            {caseSignals.nextAction}
+                          </h3>
+                        </div>
+                      </div>
+                      <p className="mt-3 max-w-3xl text-sm leading-relaxed text-zinc-600">
+                        Start here: confirm missing documents, review any risk flags, then move into the member submission
+                        or workshop tabs only when action is needed.
+                      </p>
+                    </div>
+                    <AttentionSummary signals={caseSignals} />
+                  </div>
+
+                  <div className="mt-4 grid gap-3 md:grid-cols-3">
+                    <CaseWorkspaceStat
+                      label="Missing documents"
+                      value={caseSignals.missingDocs.length ? `${caseSignals.missingDocs.length} item(s)` : 'None'}
+                      tone={caseSignals.missingDocs.length ? 'warn' : 'good'}
+                    />
+                    <CaseWorkspaceStat
+                      label="Risk flags"
+                      value={caseSignals.risks.length ? `${caseSignals.risks.length} flag(s)` : 'None'}
+                      tone={caseSignals.risks.length ? 'warn' : 'good'}
+                    />
+                    <CaseWorkspaceStat
+                      label="Admin action"
+                      value={claimItem.status === 'Pending Review' ? 'Pending review' : claimItem.status}
+                      tone={claimItem.status === 'Pending Review' ? 'warn' : 'good'}
+                    />
+                  </div>
+
+                  <div className="mt-4 grid gap-4 lg:grid-cols-2">
+                    <div className="rounded-xl border border-zinc-200/90 bg-white p-3.5 shadow-inner">
+                      <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Priority checklist</p>
+                      {caseSignals.actions.length ? (
+                        <ul className="mt-2.5 space-y-2">
+                          {caseSignals.actions.slice(0, 4).map((action) => (
+                            <li key={action} className="flex items-start gap-2 text-sm text-zinc-700">
+                              <Clock3 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" strokeWidth={2} />
+                              <span>{action}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="mt-2 text-sm text-zinc-600">No immediate admin actions detected.</p>
+                      )}
+                    </div>
+                    <div className="rounded-xl border border-zinc-200/90 bg-white p-3.5 shadow-inner">
+                      <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Handling flags</p>
+                      {caseSignals.risks.length ? (
+                        <div className="mt-2.5 flex flex-wrap gap-2">
+                          {caseSignals.risks.map((risk) => (
+                            <span key={risk} className="rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-2xs font-semibold text-amber-950">
+                              {risk}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="mt-2 text-sm text-zinc-600">No special risk flags detected.</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setTab('documents')}
+                      className="inline-flex h-9 items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 text-2xs font-semibold text-zinc-800 shadow-sm transition hover:bg-zinc-50"
+                    >
+                      Review documents
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTab('submission')}
+                      className="inline-flex h-9 items-center gap-2 rounded-lg bg-indigo-600 px-3 text-2xs font-semibold text-white shadow-sm transition hover:bg-indigo-500"
+                    >
+                      Open full submission
+                    </button>
+                    {!isModerator ? (
+                      <button
+                        type="button"
+                        onClick={() => setTab('quotes')}
+                        className="inline-flex h-9 items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-2xs font-semibold text-indigo-900 transition hover:bg-indigo-100"
+                      >
+                        Workshop / quote
+                      </button>
+                    ) : null}
+                  </div>
+                </section>
+
+                <DocumentChecklist documents={caseSignals.documents} />
+
                 <div className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner">
                   <h3 className="text-[13px] font-semibold text-zinc-900">Reference codes</h3>
                   <p className="mt-1 text-2xs leading-relaxed text-zinc-500">
@@ -2670,6 +2862,53 @@ function ClaimModal({
                     </button>
                   </section>
                 ) : null}
+              </div>
+            )}
+
+            {tab === 'documents' && (
+              <div className="space-y-4">
+                <DocumentChecklist documents={caseSignals.documents} />
+                <div className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner">
+                  <h3 className="text-[13px] font-semibold text-zinc-900">Document next steps</h3>
+                  {caseSignals.missingDocs.length ? (
+                    <ul className="mt-3 grid gap-2 sm:grid-cols-2">
+                      {caseSignals.missingDocs.map((doc) => (
+                        <li key={doc.id} className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-900">
+                          Request {doc.label.toLowerCase()} from the member.
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mt-2 text-sm text-zinc-600">
+                      Required documents are complete. Continue review from the member submission or workshop tabs.
+                    </p>
+                  )}
+                </div>
+                <div className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner">
+                  <h3 className="text-[13px] font-semibold text-zinc-900">Where to inspect files</h3>
+                  <p className="mt-2 text-sm leading-relaxed text-zinc-600">
+                    Licence, registration, photos, sketches, and declaration images live in the full member submission.
+                    Workshop PDFs and invoices are handled from Insurance quote and Purchase.
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setTab('submission')}
+                      className="inline-flex h-9 items-center rounded-lg bg-indigo-600 px-3 text-2xs font-semibold text-white shadow-sm transition hover:bg-indigo-500"
+                    >
+                      Open member submission
+                    </button>
+                    {!isModerator ? (
+                      <button
+                        type="button"
+                        onClick={() => setTab('payments')}
+                        className="inline-flex h-9 items-center rounded-lg border border-zinc-200 bg-white px-3 text-2xs font-semibold text-zinc-800 shadow-sm transition hover:bg-zinc-50"
+                      >
+                        Open purchase files
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
               </div>
             )}
 

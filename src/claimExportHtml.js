@@ -2,6 +2,7 @@
 
 import { damageDiagramExportHtml } from './DamageDiagramViewer.jsx';
 import { resolveDamageDiagramFromDamage } from './memberSubmissionUtils.js';
+import { apiBase } from './api.js';
 
 const CHECKLIST_LABELS = {
   license: 'Driver licence',
@@ -36,13 +37,21 @@ function mergeLists(...lists) {
     if (!Array.isArray(list)) continue;
     for (const file of list) {
       if (!file || typeof file !== 'object') continue;
-      const key = file.id || `${file.name}:${file.dataUrl?.length || 0}`;
+      const key = file.id || `${file.name}:${file.dataUrl?.length || file.url?.length || file.fileUrl?.length || 0}`;
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(file);
     }
   }
   return out;
+}
+
+function resolveFileHref(urlOrDataUrl) {
+  const value = String(urlOrDataUrl || '').trim();
+  if (!value || value.startsWith('data:') || value.startsWith('blob:')) return value;
+  if (value.startsWith('http://') || value.startsWith('https://')) return value;
+  const base = apiBase();
+  return base ? `${base}${value.startsWith('/') ? value : `/${value}`}` : value;
 }
 
 function submissionFromClaim(item) {
@@ -80,8 +89,14 @@ function attachmentImagesHtml(files, groupTitle) {
     .map((file, index) => {
       const name = esc(file?.name || `${groupTitle} ${index + 1}`);
       const dataUrl = typeof file?.dataUrl === 'string' ? file.dataUrl.trim() : '';
+      const storedUrl = typeof file?.url === 'string' ? file.url.trim() : typeof file?.fileUrl === 'string' ? file.fileUrl.trim() : '';
+      const href = resolveFileHref(dataUrl || storedUrl);
+      const mimeType = String(file?.mimeType || '').toLowerCase();
       if (dataUrl.startsWith('data:image/')) {
         return `<figure class="figure"><figcaption>${name}</figcaption><img src="${dataUrl}" alt="${name}" /></figure>`;
+      }
+      if (storedUrl && (mimeType.startsWith('image/') || /\.(jpe?g|png|gif|webp|bmp|heic|heif)(?:$|\?)/i.test(storedUrl))) {
+        return `<figure class="figure"><figcaption>${name}</figcaption><img src="${esc(href)}" alt="${name}" /></figure>`;
       }
       if (dataUrl.startsWith('data:application/pdf')) {
         return `<figure class="figure"><figcaption>${name}</figcaption><p class="muted">PDF attached — open this claim in the admin portal to download the file.</p></figure>`;

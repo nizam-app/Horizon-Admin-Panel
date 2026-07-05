@@ -10,6 +10,15 @@ import {
   submissionSource,
 } from './memberSubmissionUtils.js';
 import { MemberSubmissionEditPanel } from './MemberSubmissionEditPanel.jsx';
+import * as api from './api.js';
+
+function resolveFileHref(urlOrDataUrl) {
+  const value = String(urlOrDataUrl || '').trim();
+  if (!value || value.startsWith('data:') || value.startsWith('blob:')) return value;
+  if (value.startsWith('http://') || value.startsWith('https://')) return value;
+  const base = api.apiBase();
+  return base ? `${base}${value.startsWith('/') ? value : `/${value}`}` : value;
+}
 
 function DetailCard({ title, items }) {
   return (
@@ -29,15 +38,15 @@ function DetailCard({ title, items }) {
   );
 }
 
-function SubmissionImage({ label, dataUrl }) {
-  const src = String(dataUrl || '').trim();
-  if (!src.startsWith('data:image/')) return null;
+function SubmissionImage({ label, src }) {
+  const imageSrc = resolveFileHref(src);
+  if (!imageSrc) return null;
   return (
     <div className="rounded-xl border border-zinc-200/90 bg-white p-3 shadow-inner">
       <div className="flex items-center justify-between gap-2">
         <p className="min-w-0 truncate text-2xs font-semibold uppercase tracking-wider text-zinc-500">{label}</p>
         <a
-          href={src}
+          href={imageSrc}
           target="_blank"
           rel="noreferrer"
           className="shrink-0 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 text-2xs font-semibold text-zinc-800 hover:bg-zinc-100"
@@ -45,7 +54,7 @@ function SubmissionImage({ label, dataUrl }) {
           View image
         </a>
       </div>
-      <img src={src} alt={label} className="mt-2 max-h-56 w-full rounded-lg border border-zinc-100 object-contain" />
+      <img src={imageSrc} alt={label} className="mt-2 max-h-56 w-full rounded-lg border border-zinc-100 object-contain" />
     </div>
   );
 }
@@ -53,22 +62,33 @@ function SubmissionImage({ label, dataUrl }) {
 function AttachmentPreview({ file, index, groupTitle }) {
   const name = file?.name || `${groupTitle} ${index + 1}`;
   const dataUrl = typeof file?.dataUrl === 'string' ? file.dataUrl.trim() : '';
+  const storedUrl = typeof file?.url === 'string' ? file.url.trim() : typeof file?.fileUrl === 'string' ? file.fileUrl.trim() : '';
+  const mimeType = String(file?.mimeType || '').toLowerCase();
+  const isStoredImage = storedUrl && (mimeType.startsWith('image/') || /\.(jpe?g|png|gif|webp|bmp|heic|heif)$/i.test(storedUrl));
+  const isStoredPdf = storedUrl && (mimeType === 'application/pdf' || /\.pdf(?:$|\?)/i.test(storedUrl));
 
   if (dataUrl.startsWith('data:image/')) {
-    return <SubmissionImage label={name} dataUrl={dataUrl} />;
+    return <SubmissionImage label={name} src={dataUrl} />;
   }
 
-  if (dataUrl.startsWith('data:application/pdf') || dataUrl.startsWith('data:application/octet-stream')) {
+  if (isStoredImage) {
+    return <SubmissionImage label={name} src={storedUrl} />;
+  }
+
+  if (dataUrl.startsWith('data:application/pdf') || dataUrl.startsWith('data:application/octet-stream') || isStoredPdf || storedUrl) {
+    const href = resolveFileHref(dataUrl || storedUrl);
     return (
       <div className="rounded-xl border border-zinc-200/90 bg-white p-3 shadow-inner">
         <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">{name}</p>
-        <p className="mt-2 text-sm text-zinc-600">PDF attached with submission</p>
+        <p className="mt-2 text-sm text-zinc-600">File attached with submission</p>
         <a
-          href={dataUrl}
+          href={href}
+          target="_blank"
+          rel="noreferrer"
           download={name.endsWith('.pdf') ? name : `${name}.pdf`}
           className="mt-3 inline-flex rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs font-semibold text-zinc-800 hover:bg-zinc-100"
         >
-          Download PDF
+          Open file
         </a>
       </div>
     );
@@ -169,11 +189,6 @@ function MemberSubmissionView({ claimItem }) {
         ]}
       />
 
-      <AttachmentGallery title="Driver licence — front" attachments={licenseFront} />
-      <AttachmentGallery title="Driver licence — back" attachments={licenseBack} />
-      <AttachmentGallery title="Taxi authority" attachments={taxiFiles} />
-      <AttachmentGallery title="Copy of registration" attachments={regFiles} />
-
       <div className="grid gap-4 lg:grid-cols-2">
         <DetailCard
           title="Member & vehicle"
@@ -213,6 +228,18 @@ function MemberSubmissionView({ claimItem }) {
           ]}
         />
       </div>
+      {(taxiFiles.length > 0 || regFiles.length > 0) && (
+        <div className="grid gap-4 lg:grid-cols-2">
+          <AttachmentGallery title="Registration" attachments={regFiles} />
+          <AttachmentGallery title="Taxi authority" attachments={taxiFiles} />
+        </div>
+      )}
+      {(licenseFront.length > 0 || licenseBack.length > 0) && (
+        <div className="grid gap-4 lg:grid-cols-2">
+          <AttachmentGallery title="Driver licence - front" attachments={licenseFront} />
+          <AttachmentGallery title="Driver licence - back" attachments={licenseBack} />
+        </div>
+      )}
 
       <DetailCard
         title="Incident"
@@ -307,8 +334,8 @@ function MemberSubmissionView({ claimItem }) {
       />
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <SubmissionImage label="Accident sketch" dataUrl={src.accidentSketch?.diagramDataUrl} />
-        <SubmissionImage label="Signature" dataUrl={src.declaration?.signatureDataUrl} />
+        <SubmissionImage label="Accident sketch" src={src.accidentSketch?.diagramDataUrl} />
+        <SubmissionImage label="Signature" src={src.declaration?.signatureDataUrl} />
       </div>
 
       <AttachmentGallery title="Sketch uploads" attachments={sketchUploads} />

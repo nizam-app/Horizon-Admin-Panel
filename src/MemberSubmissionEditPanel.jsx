@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, ChevronLeft, ChevronRight, Eye, ExternalLink, Loader2, Plus, Trash2, Upload, X } from 'lucide-react';
 
 import { DamageDiagramViewer } from './DamageDiagramViewer.jsx';
+import * as api from './api.js';
 import {
   buildAllSubmissionDrafts,
   CHECKLIST_LABELS,
@@ -26,6 +27,14 @@ const SECTION_NAV = [
 const inputClass =
   'mt-1 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 shadow-inner outline-none placeholder:text-zinc-400 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/15';
 const labelClass = 'text-2xs font-semibold uppercase tracking-wider text-zinc-500';
+
+function resolveFileHref(urlOrDataUrl) {
+  const value = String(urlOrDataUrl || '').trim();
+  if (!value || value.startsWith('data:') || value.startsWith('blob:')) return value;
+  if (value.startsWith('http://') || value.startsWith('https://')) return value;
+  const base = api.apiBase();
+  return base ? `${base}${value.startsWith('/') ? value : `/${value}`}` : value;
+}
 
 function Field({ label, children, className = '' }) {
   return (
@@ -156,11 +165,12 @@ function EditSection({
   isOpen,
   onToggle,
 }) {
+  if (!isOpen) return null;
   return (
     <section id={`edit-section-${sectionId}`} className="overflow-hidden rounded-xl border border-zinc-200/90 bg-white shadow-inner">
       <button
         type="button"
-        onClick={onToggle}
+        onClick={isOpen ? undefined : onToggle}
         className="flex w-full items-start justify-between gap-3 border-b border-zinc-100 bg-zinc-50/50 px-4 py-3 text-left sm:px-5"
       >
         <div>
@@ -196,8 +206,12 @@ function EditSection({
 
 function attachmentKind(file) {
   const dataUrl = typeof file?.dataUrl === 'string' ? file.dataUrl.trim() : '';
+  const storedUrl = typeof file?.url === 'string' ? file.url.trim() : typeof file?.fileUrl === 'string' ? file.fileUrl.trim() : '';
+  const mimeType = String(file?.mimeType || '').toLowerCase();
   if (dataUrl.startsWith('data:image/')) return 'image';
   if (dataUrl.startsWith('data:application/pdf') || dataUrl.startsWith('data:application/octet-stream')) return 'pdf';
+  if (storedUrl && (mimeType.startsWith('image/') || /\.(jpe?g|png|gif|webp|bmp|heic|heif)(?:$|\?)/i.test(storedUrl))) return 'image';
+  if (storedUrl && (mimeType === 'application/pdf' || /\.pdf(?:$|\?)/i.test(storedUrl))) return 'pdf';
   return 'file';
 }
 
@@ -220,6 +234,8 @@ function AttachmentPreviewDialog({ files, index, onChangeIndex, onClose }) {
 
   const name = file.name || 'Attachment';
   const dataUrl = typeof file.dataUrl === 'string' ? file.dataUrl.trim() : '';
+  const storedUrl = typeof file.url === 'string' ? file.url.trim() : typeof file.fileUrl === 'string' ? file.fileUrl.trim() : '';
+  const fileHref = resolveFileHref(dataUrl || storedUrl);
   const kind = attachmentKind(file);
   const canNavigate = list.length > 1;
   const previous = () => onChangeIndex((index - 1 + list.length) % list.length);
@@ -249,9 +265,9 @@ function AttachmentPreviewDialog({ files, index, onChangeIndex, onClose }) {
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {dataUrl ? (
+            {fileHref ? (
               <a
-                href={dataUrl}
+                href={fileHref}
                 target="_blank"
                 rel="noreferrer"
                 download={name}
@@ -294,10 +310,10 @@ function AttachmentPreviewDialog({ files, index, onChangeIndex, onClose }) {
                 </button>
               </>
             ) : null}
-            {kind === 'image' ? (
-              <img src={dataUrl} alt={name} className="mx-auto max-h-[78dvh] max-w-full rounded-lg bg-white object-contain shadow-sm" />
+            {kind === 'image' && fileHref ? (
+              <img src={fileHref} alt={name} className="mx-auto max-h-[78dvh] max-w-full rounded-lg bg-white object-contain shadow-sm" />
             ) : kind === 'pdf' ? (
-              <iframe title={name} src={dataUrl} className="h-[78dvh] w-full rounded-lg border border-zinc-200 bg-white" />
+              <iframe title={name} src={fileHref} className="h-[78dvh] w-full rounded-lg border border-zinc-200 bg-white" />
             ) : (
               <div className="rounded-xl border border-dashed border-zinc-300 bg-white px-4 py-10 text-center text-sm text-zinc-600">
                 This attachment has no preview data. Use Open if available.
@@ -321,7 +337,7 @@ function AttachmentPreviewDialog({ files, index, onChangeIndex, onClose }) {
                     }`}
                   >
                     {itemKind === 'image' ? (
-                      <img src={item.dataUrl} alt="" className="h-10 w-10 shrink-0 rounded-md border border-zinc-200 object-cover" />
+                      <img src={resolveFileHref(item.dataUrl || item.url || item.fileUrl)} alt="" className="h-10 w-10 shrink-0 rounded-md border border-zinc-200 object-cover" />
                     ) : (
                       <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-zinc-200 bg-zinc-50 text-[10px] font-semibold uppercase text-zinc-500">
                         {itemKind}
@@ -396,7 +412,8 @@ function AttachmentEditor({ title, files, onChange }) {
       ) : (
         <ul className="space-y-2">
           {list.map((file, index) => {
-            const preview = typeof file.dataUrl === 'string' && file.dataUrl.startsWith('data:image/');
+            const preview = attachmentKind(file) === 'image';
+            const previewSrc = resolveFileHref(file.dataUrl || file.url || file.fileUrl);
             return (
               <li
                 key={file.id || `${file.name}-${index}`}
@@ -408,8 +425,8 @@ function AttachmentEditor({ title, files, onChange }) {
                   className="relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-zinc-200 bg-white text-2xs font-semibold text-zinc-500 ring-offset-2 transition group-hover:border-indigo-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
                   aria-label={`Preview ${file.name || 'attachment'}`}
                 >
-                  {preview ? (
-                    <img src={file.dataUrl} alt="" className="h-full w-full object-cover" />
+                  {preview && previewSrc ? (
+                    <img src={previewSrc} alt="" className="h-full w-full object-cover" />
                   ) : (
                     <span className="flex h-full w-full items-center justify-center uppercase">{attachmentKind(file)}</span>
                   )}
@@ -553,6 +570,21 @@ export function MemberSubmissionEditPanel({ claimItem, onSaveSection }) {
 
   const { src } = submissionSource(claimItem);
   const anyDirty = Object.values(dirty).some(Boolean);
+  const mergedSaveState = (...sections) => {
+    if (sections.some((section) => states[section] === 'saving')) return 'saving';
+    if (sections.some((section) => states[section] === 'error')) return 'error';
+    if (sections.some((section) => states[section] === 'saved')) return 'saved';
+    return 'idle';
+  };
+  const mergedError = (...sections) => sections.map((section) => errors[section]).find(Boolean) || '';
+  const saveVehicleSection = async () => {
+    if (dirty.memberVehicle) await save('memberVehicle', mvDraft);
+    if (dirty.checklist) await save('checklist', checklistDraft);
+  };
+  const saveDriverSection = async () => {
+    if (dirty.driver) await save('driver', driverDraft);
+    if (dirty.checklist) await save('checklist', checklistDraft);
+  };
 
   return (
     <div className="space-y-5">
@@ -616,12 +648,6 @@ export function MemberSubmissionEditPanel({ claimItem, onSaveSection }) {
           <TextInput label="Excess amount" value={checklistDraft.excessPaymentAmount} onChange={(v) => setChecklistDraft((d) => ({ ...d, excessPaymentAmount: v }))} />
           <TextInput label="Repair quote ref." value={checklistDraft.repairQuoteRef} onChange={(v) => setChecklistDraft((d) => ({ ...d, repairQuoteRef: v }))} />
         </div>
-        <div className="mt-5 grid gap-5 lg:grid-cols-2">
-          <AttachmentEditor title="Driver licence — front" files={checklistDraft.driverLicenseFrontAttachments} onChange={(files) => setChecklistDraft((d) => ({ ...d, driverLicenseFrontAttachments: files }))} />
-          <AttachmentEditor title="Driver licence — back" files={checklistDraft.driverLicenseBackAttachments} onChange={(files) => setChecklistDraft((d) => ({ ...d, driverLicenseBackAttachments: files }))} />
-          <AttachmentEditor title="Taxi authority" files={checklistDraft.taxiAuthorityAttachments} onChange={(files) => setChecklistDraft((d) => ({ ...d, taxiAuthorityAttachments: files }))} />
-          <AttachmentEditor title="Registration" files={checklistDraft.registrationAttachments} onChange={(files) => setChecklistDraft((d) => ({ ...d, registrationAttachments: files }))} />
-        </div>
       </EditSection>
 
       <EditSection
@@ -629,11 +655,14 @@ export function MemberSubmissionEditPanel({ claimItem, onSaveSection }) {
         title="Member & vehicle"
         isOpen={openSection === 'memberVehicle'}
         onToggle={() => setOpenSection((s) => (s === 'memberVehicle' ? '' : 'memberVehicle'))}
-        saveState={states.memberVehicle}
-        errorMessage={errors.memberVehicle}
-        dirty={dirty.memberVehicle}
-        onReset={() => setMvDraft(baseline.memberVehicle)}
-        onSave={() => save('memberVehicle', mvDraft)}
+        saveState={mergedSaveState('memberVehicle', 'checklist')}
+        errorMessage={mergedError('memberVehicle', 'checklist')}
+        dirty={dirty.memberVehicle || dirty.checklist}
+        onReset={() => {
+          setMvDraft(baseline.memberVehicle);
+          setChecklistDraft(baseline.checklist);
+        }}
+        onSave={saveVehicleSection}
       >
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <TextInput label="Member number" value={mvDraft.memberNumber} onChange={(v) => setMvDraft((d) => ({ ...d, memberNumber: v }))} />
@@ -648,6 +677,10 @@ export function MemberSubmissionEditPanel({ claimItem, onSaveSection }) {
           <TextInput label="Email" value={mvDraft.email} onChange={(v) => setMvDraft((d) => ({ ...d, email: v }))} />
         </div>
         <TextArea label="Address" className="mt-4" value={mvDraft.address} onChange={(v) => setMvDraft((d) => ({ ...d, address: v }))} />
+        <div className="mt-5 grid gap-5 lg:grid-cols-2">
+          <AttachmentEditor title="Registration" files={checklistDraft.registrationAttachments} onChange={(files) => setChecklistDraft((d) => ({ ...d, registrationAttachments: files }))} />
+          <AttachmentEditor title="Taxi authority" files={checklistDraft.taxiAuthorityAttachments} onChange={(files) => setChecklistDraft((d) => ({ ...d, taxiAuthorityAttachments: files }))} />
+        </div>
       </EditSection>
 
       <EditSection
@@ -655,11 +688,14 @@ export function MemberSubmissionEditPanel({ claimItem, onSaveSection }) {
         title="Driver"
         isOpen={openSection === 'driver'}
         onToggle={() => setOpenSection((s) => (s === 'driver' ? '' : 'driver'))}
-        saveState={states.driver}
-        errorMessage={errors.driver}
-        dirty={dirty.driver}
-        onReset={() => setDriverDraft(baseline.driver)}
-        onSave={() => save('driver', driverDraft)}
+        saveState={mergedSaveState('driver', 'checklist')}
+        errorMessage={mergedError('driver', 'checklist')}
+        dirty={dirty.driver || dirty.checklist}
+        onReset={() => {
+          setDriverDraft(baseline.driver);
+          setChecklistDraft(baseline.checklist);
+        }}
+        onSave={saveDriverSection}
       >
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <TextInput label="Full name" value={driverDraft.name || [driverDraft.firstName, driverDraft.lastName].filter(Boolean).join(' ')} onChange={(v) => setDriverDraft((d) => ({ ...d, name: v }))} />
@@ -686,6 +722,10 @@ export function MemberSubmissionEditPanel({ claimItem, onSaveSection }) {
           <TextInput label="Suburb" value={driverDraft.suburb} onChange={(v) => setDriverDraft((d) => ({ ...d, suburb: v }))} />
           <TextInput label="State" value={driverDraft.state} onChange={(v) => setDriverDraft((d) => ({ ...d, state: v }))} />
           <TextInput label="Postcode" value={driverDraft.postcode} onChange={(v) => setDriverDraft((d) => ({ ...d, postcode: v }))} />
+        </div>
+        <div className="mt-5 grid gap-5 lg:grid-cols-2">
+          <AttachmentEditor title="Driver licence - front" files={checklistDraft.driverLicenseFrontAttachments} onChange={(files) => setChecklistDraft((d) => ({ ...d, driverLicenseFrontAttachments: files }))} />
+          <AttachmentEditor title="Driver licence - back" files={checklistDraft.driverLicenseBackAttachments} onChange={(files) => setChecklistDraft((d) => ({ ...d, driverLicenseBackAttachments: files }))} />
         </div>
       </EditSection>
 
@@ -714,6 +754,17 @@ export function MemberSubmissionEditPanel({ claimItem, onSaveSection }) {
         <TextInput label="Traffic controls (comma-separated)" className="mt-4" value={trafficControlsText} onChange={(v) => setIncidentDraft((d) => ({ ...d, trafficControls: v.split(',').map((s) => s.trim()).filter(Boolean) }))} />
         <TextArea label="Address detail" className="mt-4" value={incidentDraft.addressDetailOptional} onChange={(v) => setIncidentDraft((d) => ({ ...d, addressDetailOptional: v }))} />
         <TextArea label="Description" className="mt-4" rows={4} value={incidentDraft.description} onChange={(v) => setIncidentDraft((d) => ({ ...d, description: v }))} />
+        {src.accidentSketch?.diagramDataUrl?.startsWith('data:image/') ? (
+          <div className="mt-5 overflow-hidden rounded-xl border border-zinc-200/90 bg-white shadow-inner">
+            <div className="border-b border-zinc-100 bg-zinc-50/50 px-4 py-3">
+              <h3 className="text-[13px] font-semibold text-zinc-900">Accident sketch</h3>
+              <p className="mt-1 text-2xs text-zinc-500">Member drawing from the accident scene step.</p>
+            </div>
+            <div className="p-4">
+              <img src={src.accidentSketch.diagramDataUrl} alt="Sketch" className="max-h-56 rounded-lg border border-zinc-200 object-contain" />
+            </div>
+          </div>
+        ) : null}
       </EditSection>
 
       <EditSection
@@ -840,16 +891,6 @@ export function MemberSubmissionEditPanel({ claimItem, onSaveSection }) {
         ) : null}
       </EditSection>
 
-      {src.accidentSketch?.diagramDataUrl?.startsWith('data:image/') ? (
-        <section className="overflow-hidden rounded-xl border border-zinc-200/90 bg-white shadow-inner">
-          <div className="border-b border-zinc-100 bg-zinc-50/50 px-4 py-3">
-            <h3 className="text-[13px] font-semibold text-zinc-900">Accident sketch (view only)</h3>
-          </div>
-          <div className="p-4">
-            <img src={src.accidentSketch.diagramDataUrl} alt="Sketch" className="max-h-56 rounded-lg border border-zinc-200 object-contain" />
-          </div>
-        </section>
-      ) : null}
     </div>
   );
 }
