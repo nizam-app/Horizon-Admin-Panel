@@ -503,7 +503,7 @@ function emptyParty() {
   };
 }
 
-export function MemberSubmissionEditPanel({ claimItem, onSaveSection }) {
+export function MemberSubmissionEditPanel({ claimItem, onSaveSection, onDirtyChange }) {
   const { payload } = submissionSource(claimItem);
   const syncKey = submissionSyncKey(claimItem);
   const [loadedKey, setLoadedKey] = useState(syncKey);
@@ -570,6 +570,12 @@ export function MemberSubmissionEditPanel({ claimItem, onSaveSection }) {
 
   const { src } = submissionSource(claimItem);
   const anyDirty = Object.values(dirty).some(Boolean);
+  useEffect(() => {
+    onDirtyChange?.(anyDirty);
+  }, [anyDirty, onDirtyChange]);
+  useEffect(() => {
+    return () => onDirtyChange?.(false);
+  }, [onDirtyChange]);
   const mergedSaveState = (...sections) => {
     if (sections.some((section) => states[section] === 'saving')) return 'saving';
     if (sections.some((section) => states[section] === 'error')) return 'error';

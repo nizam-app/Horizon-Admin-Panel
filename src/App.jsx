@@ -28,7 +28,7 @@ import {
 
 import * as api from './api.js';
 import { DamageDiagramViewer } from './DamageDiagramViewer.jsx';
-import { MemberSubmissionPanel } from './MemberSubmissionPanel.jsx';
+import { AttachmentPreview, SubmissionImage, MemberSubmissionPanel } from './MemberSubmissionPanel.jsx';
 import { buildClaimExportHtml, openClaimExportPrint } from './claimExportHtml.js';
 import {
   mergeAttachmentLists,
@@ -84,10 +84,9 @@ const PART_STATUS_OPTIONS = [
 
 const MODAL_TABS = [
   { id: 'overview', label: 'Summary' },
+  { id: 'evidence', label: 'Evidence' },
   { id: 'submission', label: 'Member submission' },
-  { id: 'documents', label: 'Documents' },
-  { id: 'records', label: 'Vehicle & incident' },
-  { id: 'parties', label: 'Parties & witnesses' },
+  { id: 'documents', label: 'Checklist' },
   { id: 'quotes', label: 'Insurance quote' },
   { id: 'payments', label: 'Purchase' },
 ];
@@ -832,6 +831,154 @@ function claimDocumentChecklist(item) {
     ...row,
     missing: row.required && !row.complete,
   }));
+}
+
+function claimEvidenceGroups(item) {
+  const { payload, data, src, submission } = submissionSource(item);
+  const damage = { ...(data.damage || {}), ...(payload?.damage || {}) };
+  const diagram = damage.diagram || {};
+  const parties = src.otherParties || data.otherParties || [];
+  const groups = [];
+
+  const pushFiles = (id, title, files, category = 'other') => {
+    const list = mergeAttachmentLists(files);
+    if (list.length) groups.push({ id, title, type: 'files', files: list, category });
+  };
+  const pushImage = (id, title, srcValue, category = 'other') => {
+    if (typeof srcValue === 'string' && srcValue.trim()) {
+      groups.push({ id, title, type: 'image', src: srcValue, category });
+    }
+  };
+
+  pushFiles('driver-license-front', 'Driver licence - front', mergeAttachmentLists(src.driverLicenseFrontAttachments, submission.driverLicenseFrontAttachments), 'licence');
+  pushFiles('driver-license-back', 'Driver licence - back', mergeAttachmentLists(src.driverLicenseBackAttachments, submission.driverLicenseBackAttachments), 'licence');
+  pushFiles('registration', 'Registration', mergeAttachmentLists(src.registrationAttachments, submission.registrationAttachments), 'vehicle');
+  pushFiles('taxi-authority', 'Taxi authority', mergeAttachmentLists(src.taxiAuthorityAttachments, submission.taxiAuthorityAttachments), 'vehicle');
+  pushFiles('police-report', 'Police report', mergeAttachmentLists(src.policeReportAttachments, submission.policeReportAttachments), 'documents');
+  pushImage('accident-sketch', 'Accident sketch', src.accidentSketch?.diagramDataUrl, 'sketch');
+  pushFiles('sketch-uploads', 'Accident sketch uploads', mergeAttachmentLists(src.accidentSketch?.attachments), 'sketch');
+  pushFiles('damage-scene', 'Damage scene photos', mergeAttachmentLists(diagram.scenePhotos), 'damage');
+  pushFiles('damage-detail', 'Damage close-up photos', mergeAttachmentLists(diagram.detailPhotos), 'damage');
+  pushFiles('other-demand', 'Other party demand', mergeAttachmentLists(src.otherDemandAttachments, submission.otherDemandAttachments), 'parties');
+  pushFiles('repair-quote', 'Repair quote files', mergeAttachmentLists(src.repairQuoteAttachments, submission.repairQuoteAttachments), 'documents');
+
+  parties.forEach((party, index) => {
+    pushFiles(`party-${index}-front`, `Other party ${index + 1} licence - front`, mergeAttachmentLists(party.licenceFrontAttachments), 'parties');
+    pushFiles(`party-${index}-back`, `Other party ${index + 1} licence - back`, mergeAttachmentLists(party.licenceBackAttachments), 'parties');
+  });
+
+  pushImage('signature', 'Declaration signature', src.declaration?.signatureDataUrl || data.declaration?.signatureDataUrl, 'signature');
+  return groups;
+}
+
+function EvidenceWorkspace({ groups, onOpenSubmission }) {
+  const total = groups.reduce((sum, group) => sum + (group.type === 'files' ? group.files.length : 1), 0);
+  const [activeCategory, setActiveCategory] = useState('all');
+  const evidenceItems = groups.flatMap((group) =>
+    group.type === 'image'
+      ? [{ id: group.id, type: 'image', title: group.title, category: group.category || 'other', src: group.src }]
+      : group.files.map((file, index) => ({
+          id: `${group.id}-${file.id || file.name || index}`,
+          type: 'file',
+          title: group.title,
+          category: group.category || 'other',
+          file,
+          index,
+        })),
+  );
+  const filters = [
+    { id: 'all', label: 'All' },
+    { id: 'licence', label: 'Licence' },
+    { id: 'vehicle', label: 'Vehicle docs' },
+    { id: 'damage', label: 'Damage' },
+    { id: 'sketch', label: 'Sketch' },
+    { id: 'documents', label: 'Documents' },
+    { id: 'parties', label: 'Parties' },
+    { id: 'signature', label: 'Signature' },
+  ]
+    .map((filter) => ({
+      ...filter,
+      count:
+        filter.id === 'all'
+          ? evidenceItems.length
+          : evidenceItems.filter((item) => item.category === filter.id).length,
+    }))
+    .filter((filter) => filter.id === 'all' || filter.count > 0);
+  const visibleItems =
+    activeCategory === 'all'
+      ? evidenceItems
+      : evidenceItems.filter((item) => item.category === activeCategory);
+
+  return (
+    <div className="space-y-4">
+      <section className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h3 className="text-[13px] font-semibold text-zinc-900">Evidence gallery</h3>
+            <p className="mt-1 text-sm leading-relaxed text-zinc-600">
+              Member-submitted images and files are arranged as a scan-friendly evidence board.
+            </p>
+          </div>
+          <span className="inline-flex w-fit rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-2xs font-semibold uppercase tracking-wider text-zinc-600">
+            {total} item{total === 1 ? '' : 's'}
+          </span>
+        </div>
+        {filters.length > 1 ? (
+          <div className="-mx-1 mt-4 flex gap-2 overflow-x-auto px-1 pb-1">
+            {filters.map((filter) => (
+              <button
+                key={filter.id}
+                type="button"
+                onClick={() => setActiveCategory(filter.id)}
+                className={`inline-flex h-9 shrink-0 items-center gap-2 rounded-lg border px-3 text-2xs font-semibold transition ${
+                  activeCategory === filter.id
+                    ? 'border-zinc-950 bg-zinc-950 text-white'
+                    : 'border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100'
+                }`}
+              >
+                {filter.label}
+                <span className={`font-mono tabular-nums ${activeCategory === filter.id ? 'text-white/75' : 'text-zinc-500'}`}>
+                  {filter.count}
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </section>
+
+      {visibleItems.length ? (
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+          {visibleItems.map((item) => (
+            <div key={item.id} className="min-w-0 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <h4 className="min-w-0 truncate text-[13px] font-semibold text-zinc-900">{item.title}</h4>
+                <span className="shrink-0 rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">
+                  {filters.find((filter) => filter.id === item.category)?.label || 'File'}
+                </span>
+              </div>
+              {item.type === 'image' ? (
+                <SubmissionImage label={item.title} src={item.src} />
+              ) : (
+                <AttachmentPreview file={item.file} index={item.index} groupTitle={item.title} />
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <section className="rounded-xl border border-dashed border-zinc-200 bg-white px-4 py-10 text-center shadow-inner">
+          <p className="text-sm font-semibold text-zinc-900">No evidence files found</p>
+          <p className="mt-1 text-sm text-zinc-600">Review the member submission if this claim should include uploaded evidence.</p>
+          <button
+            type="button"
+            onClick={onOpenSubmission}
+            className="mt-4 inline-flex h-9 items-center rounded-lg bg-indigo-600 px-3 text-2xs font-semibold text-white shadow-sm transition hover:bg-indigo-500"
+          >
+            Open member submission
+          </button>
+        </section>
+      )}
+    </div>
+  );
 }
 
 function buildClaimSignals(item) {
@@ -1908,7 +2055,95 @@ function AttentionSummary({ signals, compact = false }) {
   );
 }
 
-function DocumentChecklist({ documents }) {
+function DocumentChecklist({ documents, onViewEvidence }) {
+  const rows = Array.isArray(documents) ? documents : [];
+  const required = rows.filter((row) => row.required);
+  const missingRequired = required.filter((row) => !row.complete);
+  const completeRequired = required.filter((row) => row.complete);
+  const optionalRows = rows.filter((row) => !row.required);
+  const completeRequiredCount = completeRequired.length;
+
+  const renderRows = (items, emptyText) =>
+    items.length ? (
+      <div className="divide-y divide-zinc-100">
+        {items.map((row) => (
+          <div key={row.id} className="flex items-center justify-between gap-3 px-4 py-3">
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-zinc-900">{row.label}</p>
+              <p className="mt-0.5 truncate text-2xs text-zinc-500">
+                {row.required ? 'Required' : 'Optional'}
+                {row.detail ? ` - ${row.detail}` : ''}
+              </p>
+            </div>
+            <span
+              className={`inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-2 py-1 text-2xs font-semibold ${
+                row.complete
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                  : row.required
+                    ? 'border-rose-200 bg-rose-50 text-rose-900'
+                    : 'border-zinc-200 bg-zinc-50 text-zinc-600'
+              }`}
+            >
+              {row.complete ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Clock3 className="h-3.5 w-3.5" />}
+              {row.complete ? 'Complete' : row.required ? 'Missing' : 'Optional'}
+            </span>
+          </div>
+        ))}
+      </div>
+    ) : (
+      <p className="px-4 py-3 text-sm text-zinc-500">{emptyText}</p>
+    );
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-zinc-200/90 bg-white shadow-inner">
+      <div className="flex flex-col gap-3 border-b border-zinc-100 bg-zinc-50/50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h3 className="text-[13px] font-semibold text-zinc-900">Checklist</h3>
+          <p className="mt-0.5 text-2xs text-zinc-500">
+            {completeRequiredCount}/{required.length} required complete
+            {missingRequired.length ? ` - ${missingRequired.length} needs attention` : ''}
+          </p>
+        </div>
+        {onViewEvidence ? (
+          <button
+            type="button"
+            onClick={onViewEvidence}
+            className="inline-flex h-9 w-fit items-center gap-2 rounded-lg bg-zinc-950 px-3 text-2xs font-semibold text-white shadow-sm transition hover:bg-zinc-800"
+          >
+            <FileSearch className="h-3.5 w-3.5" strokeWidth={2} />
+            View evidence
+          </button>
+        ) : null}
+      </div>
+      <div className="divide-y divide-zinc-100">
+        <section>
+          <div className="flex items-center gap-2 px-4 py-2.5">
+            <AlertTriangle className={`h-4 w-4 ${missingRequired.length ? 'text-rose-600' : 'text-emerald-600'}`} strokeWidth={2} />
+            <h4 className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Needs attention</h4>
+          </div>
+          {renderRows(missingRequired, 'No missing required documents.')}
+        </section>
+        <section>
+          <div className="flex items-center gap-2 px-4 py-2.5">
+            <CheckCircle2 className="h-4 w-4 text-emerald-600" strokeWidth={2} />
+            <h4 className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Complete required</h4>
+          </div>
+          {renderRows(completeRequired, 'No required documents have been completed yet.')}
+        </section>
+        {optionalRows.length ? (
+          <section>
+            <div className="px-4 py-2.5">
+              <h4 className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Optional / supporting</h4>
+            </div>
+            {renderRows(optionalRows, 'No optional supporting evidence recorded.')}
+          </section>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function LegacyDocumentChecklist({ documents }) {
   const rows = Array.isArray(documents) ? documents : [];
   return (
     <div className="overflow-hidden rounded-xl border border-zinc-200/90 bg-white shadow-inner">
@@ -2064,6 +2299,7 @@ function ClaimModal({
   onRequestDelete,
 }) {
   const [tab, setTab] = useState('overview');
+  const [memberSubmissionDirty, setMemberSubmissionDirty] = useState(false);
   const [pdfBusy, setPdfBusy] = useState(false);
   const [priceDraft, setPriceDraft] = useState(() => priceDraftFromClaim(claimItem));
   const [quoteSave, setQuoteSave] = useState('idle');
@@ -2093,6 +2329,20 @@ function ClaimModal({
   const tabRailRef = useRef(null);
 
   const openDeleteDialog = () => onRequestDelete?.();
+  const confirmLeaveMemberEdit = () => {
+    if (!memberSubmissionDirty) return true;
+    return window.confirm('You have unsaved member submission changes. Discard them and leave this edit session?');
+  };
+  const navigateTab = (nextTab) => {
+    if (nextTab === tab) return;
+    if (!confirmLeaveMemberEdit()) return;
+    setMemberSubmissionDirty(false);
+    setTab(nextTab);
+  };
+  const closeModal = () => {
+    if (!confirmLeaveMemberEdit()) return;
+    onClose();
+  };
 
   const scrollTabRail = (direction) => {
     const rail = tabRailRef.current;
@@ -2105,6 +2355,7 @@ function ClaimModal({
 
   useEffect(() => {
     setTab('overview');
+    setMemberSubmissionDirty(false);
   }, [claimItem.id, claimItem._id]);
 
   useEffect(() => {
@@ -2504,15 +2755,13 @@ function ClaimModal({
   };
 
   const activeTabLabel = MODAL_TABS.find((item) => item.id === tab)?.label || 'Case file';
+  const evidenceGroups = claimEvidenceGroups(claimItem);
   const quoteSummary =
     quotePrice != null
       ? formatAud(quotePrice)
       : insuranceApprovedPrice != null
         ? formatAud(insuranceApprovedPrice)
         : 'Not set';
-  const sidebarNote = adminNote.trim()
-    ? `${adminNote.trim().slice(0, 110)}${adminNote.trim().length > 110 ? '...' : ''}`
-    : 'No admin note';
 
   return (
     <div className="fixed inset-0 z-50 flex bg-zinc-950/55 p-0 backdrop-blur-sm lg:p-3">
@@ -2522,7 +2771,7 @@ function ClaimModal({
         aria-modal="true"
         aria-labelledby="claim-modal-title"
       >
-        <div className="flex shrink-0 items-start justify-between gap-3 border-b border-zinc-200/90 bg-white px-3 py-3 sm:px-6 sm:py-4">
+        <div className="flex shrink-0 items-start justify-between gap-3 border-b border-zinc-200/90 bg-white px-3 py-2.5 sm:px-5 sm:py-3">
           <div className="min-w-0">
             <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-2xs text-zinc-500">
               <span className="font-mono font-medium text-zinc-600" title="Member portal save code">
@@ -2554,9 +2803,14 @@ function ClaimModal({
               </span>
               <StatusBadge status={claimItem.status} />
             </div>
-            <p className="mt-3 hidden max-w-4xl text-sm leading-relaxed text-zinc-600 sm:block">{claimItem.summary || 'No summary recorded.'}</p>
+            <p className="mt-2 hidden max-w-4xl truncate text-sm leading-relaxed text-zinc-600 sm:block">{claimItem.summary || 'No summary recorded.'}</p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            {memberSubmissionDirty ? (
+              <span className="hidden rounded-lg border border-amber-300 bg-amber-50 px-2 py-0.5 text-2xs font-semibold uppercase tracking-wide text-amber-900 shadow-inner sm:inline-flex">
+                Unsaved edits
+              </span>
+            ) : null}
             {isModerator && (
               <span className="hidden rounded-lg border border-zinc-300/90 bg-zinc-100 px-2 py-0.5 text-2xs font-semibold uppercase tracking-wide text-zinc-800 shadow-inner sm:inline-flex">
                 View only
@@ -2564,7 +2818,7 @@ function ClaimModal({
             )}
             <button
               type="button"
-              onClick={onClose}
+              onClick={closeModal}
               className="flex h-10 w-10 items-center justify-center rounded-xl border border-zinc-200/90 bg-white text-zinc-600 shadow-sm transition hover:bg-zinc-50 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 focus-visible:ring-offset-2"
               aria-label="Close"
             >
@@ -2573,7 +2827,7 @@ function ClaimModal({
           </div>
         </div>
 
-        <div className="grid shrink-0 grid-cols-2 gap-2 border-b border-zinc-200/90 bg-zinc-50/80 px-3 py-2.5 sm:px-6 lg:grid-cols-4 lg:py-3">
+        <div className="grid shrink-0 grid-cols-2 gap-2 border-b border-zinc-200/90 bg-zinc-50/80 px-3 py-2 sm:px-5 lg:grid-cols-4">
           <CaseWorkspaceStat label="Submitted" value={claimItem.submittedAt} />
           <CaseWorkspaceStat label="Incident" value={claimItem.dateOfIncident} />
           <CaseWorkspaceStat label="Quote" value={quoteSummary} tone={quotePrice != null || insuranceApprovedPrice != null ? 'good' : 'warn'} />
@@ -2596,7 +2850,7 @@ function ClaimModal({
                   <button
                     key={item.id}
                     type="button"
-                    onClick={() => setTab(item.id)}
+                    onClick={() => navigateTab(item.id)}
                     data-active-tab={tab === item.id ? 'true' : undefined}
                     className={`flex h-10 min-w-[8.5rem] max-w-[11rem] flex-none items-center justify-center gap-2 rounded-xl px-3 text-center text-xs font-semibold leading-tight transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 lg:h-auto lg:min-w-0 lg:max-w-none lg:justify-between lg:py-2.5 lg:text-left ${
                       tab === item.id
@@ -2620,118 +2874,121 @@ function ClaimModal({
             </div>
           </nav>
 
-          <main className="min-h-0 flex-1 overflow-y-auto scrollbar-thin bg-zinc-50/70 px-3 py-3 sm:px-6 sm:py-5">
-            <div className="mx-auto max-w-6xl">
+          <main className="min-h-0 flex-1 overflow-y-auto scrollbar-thin bg-zinc-50/70 px-3 py-3 sm:px-5 sm:py-4">
+            <div className="w-full">
             {tab === 'submission' && (
               <MemberSubmissionPanel
                 claimItem={claimItem}
                 readOnly={isModerator}
                 onSaveSection={isModerator ? undefined : onSaveMemberSubmission}
+                onDirtyChange={setMemberSubmissionDirty}
               />
+            )}
+
+            {tab === 'evidence' && (
+              <EvidenceWorkspace groups={evidenceGroups} onOpenSubmission={() => navigateTab('submission')} />
             )}
 
             {tab === 'overview' && (
               <div className="space-y-4">
-                <section className="rounded-xl border border-indigo-200/80 bg-gradient-to-br from-indigo-50/90 via-white to-white p-4 shadow-inner sm:p-5">
-                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                <section className="rounded-xl border border-indigo-200/80 bg-white p-3.5 shadow-inner sm:p-4">
+                  <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.85fr)]">
                     <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-indigo-200 bg-white text-indigo-700 shadow-inner">
+                      <div className="flex items-start gap-3">
+                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-indigo-200 bg-indigo-50 text-indigo-700 shadow-inner">
                           <ClipboardCheck className="h-4 w-4" strokeWidth={2} />
                         </span>
-                        <div>
+                        <div className="min-w-0">
                           <p className="text-2xs font-semibold uppercase tracking-wider text-indigo-900">Case command center</p>
                           <h3 className="mt-0.5 text-lg font-semibold tracking-tight text-zinc-950">
                             {caseSignals.nextAction}
                           </h3>
+                          <p className="mt-1 max-w-3xl text-sm leading-relaxed text-zinc-600">
+                            Confirm the required documents, review flags, then set quote/payment/disposition.
+                          </p>
                         </div>
                       </div>
-                      <p className="mt-3 max-w-3xl text-sm leading-relaxed text-zinc-600">
-                        Start here: confirm missing documents, review any risk flags, then move into the member submission
-                        or workshop tabs only when action is needed.
-                      </p>
-                    </div>
-                    <AttentionSummary signals={caseSignals} />
-                  </div>
 
-                  <div className="mt-4 grid gap-3 md:grid-cols-3">
-                    <CaseWorkspaceStat
-                      label="Missing documents"
-                      value={caseSignals.missingDocs.length ? `${caseSignals.missingDocs.length} item(s)` : 'None'}
-                      tone={caseSignals.missingDocs.length ? 'warn' : 'good'}
-                    />
-                    <CaseWorkspaceStat
-                      label="Risk flags"
-                      value={caseSignals.risks.length ? `${caseSignals.risks.length} flag(s)` : 'None'}
-                      tone={caseSignals.risks.length ? 'warn' : 'good'}
-                    />
-                    <CaseWorkspaceStat
-                      label="Admin action"
-                      value={claimItem.status === 'Pending Review' ? 'Pending review' : claimItem.status}
-                      tone={claimItem.status === 'Pending Review' ? 'warn' : 'good'}
-                    />
-                  </div>
+                      <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                        <CaseWorkspaceStat
+                          label="Documents"
+                          value={caseSignals.missingDocs.length ? `${caseSignals.missingDocs.length} missing` : 'Complete'}
+                          tone={caseSignals.missingDocs.length ? 'warn' : 'good'}
+                        />
+                        <CaseWorkspaceStat
+                          label="Risk flags"
+                          value={caseSignals.risks.length ? `${caseSignals.risks.length} flag(s)` : 'None'}
+                          tone={caseSignals.risks.length ? 'warn' : 'good'}
+                        />
+                        <CaseWorkspaceStat
+                          label="Admin action"
+                          value={claimItem.status === 'Pending Review' ? 'Pending review' : claimItem.status}
+                          tone={claimItem.status === 'Pending Review' ? 'warn' : 'good'}
+                        />
+                      </div>
 
-                  <div className="mt-4 grid gap-4 lg:grid-cols-2">
-                    <div className="rounded-xl border border-zinc-200/90 bg-white p-3.5 shadow-inner">
-                      <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Priority checklist</p>
-                      {caseSignals.actions.length ? (
-                        <ul className="mt-2.5 space-y-2">
-                          {caseSignals.actions.slice(0, 4).map((action) => (
-                            <li key={action} className="flex items-start gap-2 text-sm text-zinc-700">
-                              <Clock3 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" strokeWidth={2} />
-                              <span>{action}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <p className="mt-2 text-sm text-zinc-600">No immediate admin actions detected.</p>
-                      )}
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => navigateTab('evidence')}
+                          className="inline-flex h-9 items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 text-2xs font-semibold text-zinc-800 shadow-sm transition hover:bg-zinc-50"
+                        >
+                          Review evidence
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => navigateTab('submission')}
+                          className="inline-flex h-9 items-center gap-2 rounded-lg bg-indigo-600 px-3 text-2xs font-semibold text-white shadow-sm transition hover:bg-indigo-500"
+                        >
+                          Open full submission
+                        </button>
+                        {!isModerator ? (
+                          <button
+                            type="button"
+                            onClick={() => navigateTab('quotes')}
+                            className="inline-flex h-9 items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-2xs font-semibold text-indigo-900 transition hover:bg-indigo-100"
+                          >
+                            Workshop / quote
+                          </button>
+                        ) : null}
+                      </div>
                     </div>
-                    <div className="rounded-xl border border-zinc-200/90 bg-white p-3.5 shadow-inner">
-                      <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Handling flags</p>
-                      {caseSignals.risks.length ? (
-                        <div className="mt-2.5 flex flex-wrap gap-2">
-                          {caseSignals.risks.map((risk) => (
-                            <span key={risk} className="rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-2xs font-semibold text-amber-950">
-                              {risk}
-                            </span>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="mt-2 text-sm text-zinc-600">No special risk flags detected.</p>
-                      )}
-                    </div>
-                  </div>
 
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setTab('documents')}
-                      className="inline-flex h-9 items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 text-2xs font-semibold text-zinc-800 shadow-sm transition hover:bg-zinc-50"
-                    >
-                      Review documents
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setTab('submission')}
-                      className="inline-flex h-9 items-center gap-2 rounded-lg bg-indigo-600 px-3 text-2xs font-semibold text-white shadow-sm transition hover:bg-indigo-500"
-                    >
-                      Open full submission
-                    </button>
-                    {!isModerator ? (
-                      <button
-                        type="button"
-                        onClick={() => setTab('quotes')}
-                        className="inline-flex h-9 items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-2xs font-semibold text-indigo-900 transition hover:bg-indigo-100"
-                      >
-                        Workshop / quote
-                      </button>
-                    ) : null}
+                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+                      <div className="rounded-xl border border-zinc-200/90 bg-zinc-50/70 p-3 shadow-inner">
+                        <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Priority checklist</p>
+                        {caseSignals.actions.length ? (
+                          <ul className="mt-2 grid gap-1.5">
+                            {caseSignals.actions.slice(0, 4).map((action) => (
+                              <li key={action} className="flex items-start gap-2 text-sm text-zinc-700">
+                                <Clock3 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" strokeWidth={2} />
+                                <span>{action}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p className="mt-2 text-sm text-zinc-600">No immediate admin actions detected.</p>
+                        )}
+                      </div>
+                      <div className="rounded-xl border border-zinc-200/90 bg-zinc-50/70 p-3 shadow-inner">
+                        <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Handling flags</p>
+                        {caseSignals.risks.length ? (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {caseSignals.risks.map((risk) => (
+                              <span key={risk} className="rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-2xs font-semibold text-amber-950">
+                                {risk}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="mt-2 text-sm text-zinc-600">No special risk flags detected.</p>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 </section>
 
-                <DocumentChecklist documents={caseSignals.documents} />
+                <DocumentChecklist documents={caseSignals.documents} onViewEvidence={() => navigateTab('evidence')} />
 
                 <div className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner">
                   <h3 className="text-[13px] font-semibold text-zinc-900">Reference codes</h3>
@@ -2798,7 +3055,7 @@ function ClaimModal({
                       </p>
                       <button
                         type="button"
-                        onClick={() => setTab('quotes')}
+                        onClick={() => navigateTab('quotes')}
                         className="mt-2.5 inline-flex h-9 items-center gap-2 rounded-lg bg-indigo-600 px-3 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
                       >
                         <FileText className="h-3.5 w-3.5" strokeWidth={2} />
@@ -2807,14 +3064,49 @@ function ClaimModal({
                     </div>
                   )}
                 </div>
-                <div className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner">
-                  <h3 className="text-[13px] font-semibold text-zinc-900">Summary</h3>
-                  <dl className="mt-1 divide-y divide-zinc-100">
-                    {detailFields.map((field) => (
-                      <SummaryItem key={field.label} label={field.label} value={field.getter(data)} />
-                    ))}
-                    <SummaryItem label="Description" value={data.incident?.description || claimItem.summary} />
-                  </dl>
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <DetailCard
+                    title="Vehicle and driver"
+                    items={[
+                      ['Owner', data.memberVehicle?.ownerName],
+                      ['Driver', claimItem.driverName],
+                      ['Plate', claimItem.plateNumber],
+                      ['Vehicle', [data.memberVehicle?.make, data.memberVehicle?.model].filter(Boolean).join(' ')],
+                      ['Claim type', data.memberVehicle?.claimType],
+                    ]}
+                  />
+                  <DetailCard
+                    title="Incident"
+                    items={[
+                      ['Date', claimItem.dateOfIncident],
+                      ['Street', data.incident?.streetName],
+                      ['Suburb', data.incident?.suburb],
+                      ['Road surface', data.incident?.roadSurface],
+                      ['Traffic controls', Array.isArray(data.incident?.trafficControls) ? data.incident.trafficControls.join(', ') : data.incident?.trafficControls],
+                      ['Description', data.incident?.description || claimItem.summary],
+                    ]}
+                  />
+                </div>
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <DetailCard
+                    title="Damage and towing"
+                    items={[
+                      ['Claiming damage', data.damage?.claimingDamage],
+                      ['Vehicle towed', data.damage?.towed],
+                      ['Current location', data.damage?.currentVehicleLocation],
+                      ['Damage markings', damageMarkerCount || damageStrokeCount ? `${damageMarkerCount} marker(s), ${damageStrokeCount} drawing(s)` : 'None mapped'],
+                    ]}
+                  />
+                  <DetailCard
+                    title="Parties and witnesses"
+                    items={[
+                      ['Other parties', otherParties.length ? `${otherParties.length} recorded` : 'None recorded'],
+                      ['Witness 1', witnessDetails.witness1Name],
+                      ['Witness 1 mobile', witnessDetails.witness1Mobile],
+                      ['Witness 2', witnessDetails.witness2Name],
+                      ['Witness 2 mobile', witnessDetails.witness2Mobile],
+                    ]}
+                  />
                 </div>
                 <div>
                   <h3 className="mb-2 text-[13px] font-semibold text-zinc-900">Review signals</h3>
@@ -2867,41 +3159,25 @@ function ClaimModal({
 
             {tab === 'documents' && (
               <div className="space-y-4">
-                <DocumentChecklist documents={caseSignals.documents} />
-                <div className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner">
-                  <h3 className="text-[13px] font-semibold text-zinc-900">Document next steps</h3>
-                  {caseSignals.missingDocs.length ? (
-                    <ul className="mt-3 grid gap-2 sm:grid-cols-2">
-                      {caseSignals.missingDocs.map((doc) => (
-                        <li key={doc.id} className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-900">
-                          Request {doc.label.toLowerCase()} from the member.
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="mt-2 text-sm text-zinc-600">
-                      Required documents are complete. Continue review from the member submission or workshop tabs.
-                    </p>
-                  )}
-                </div>
+                <DocumentChecklist documents={caseSignals.documents} onViewEvidence={() => navigateTab('evidence')} />
                 <div className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner">
                   <h3 className="text-[13px] font-semibold text-zinc-900">Where to inspect files</h3>
                   <p className="mt-2 text-sm leading-relaxed text-zinc-600">
-                    Licence, registration, photos, sketches, and declaration images live in the full member submission.
+                    Licence, registration, photos, sketches, and declaration images live in Evidence.
                     Workshop PDFs and invoices are handled from Insurance quote and Purchase.
                   </p>
                   <div className="mt-3 flex flex-wrap gap-2">
                     <button
                       type="button"
-                      onClick={() => setTab('submission')}
+                      onClick={() => navigateTab('evidence')}
                       className="inline-flex h-9 items-center rounded-lg bg-indigo-600 px-3 text-2xs font-semibold text-white shadow-sm transition hover:bg-indigo-500"
                     >
-                      Open member submission
+                      Open evidence
                     </button>
                     {!isModerator ? (
                       <button
                         type="button"
-                        onClick={() => setTab('payments')}
+                        onClick={() => navigateTab('payments')}
                         className="inline-flex h-9 items-center rounded-lg border border-zinc-200 bg-white px-3 text-2xs font-semibold text-zinc-800 shadow-sm transition hover:bg-zinc-50"
                       >
                         Open purchase files
@@ -2912,7 +3188,7 @@ function ClaimModal({
               </div>
             )}
 
-            {tab === 'records' && (
+            {false && tab === 'records' && (
               <div className="space-y-4">
                 <div className="grid gap-4 lg:grid-cols-2">
                   <DetailCard
@@ -2975,7 +3251,7 @@ function ClaimModal({
               </div>
             )}
 
-            {tab === 'parties' && (
+            {false && tab === 'parties' && (
               <div className="grid gap-4 lg:grid-cols-2">
                 <DetailCard
                   title="Witness details"
@@ -3709,85 +3985,6 @@ function ClaimModal({
             )}
           </div>
           </main>
-
-          <aside className="hidden shrink-0 border-t border-zinc-200/90 bg-white px-4 py-4 lg:block lg:w-80 lg:overflow-y-auto lg:border-l lg:border-t-0 lg:px-5">
-            <div className="space-y-4">
-              <section className="rounded-xl border border-zinc-200/90 bg-zinc-50/70 p-3.5 shadow-inner">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Case snapshot</p>
-                    <p className="mt-1 text-sm font-semibold text-zinc-950">{claimRef(claimItem)}</p>
-                  </div>
-                  <StatusBadge status={claimItem.status} />
-                </div>
-                <div className="mt-3 divide-y divide-zinc-100">
-                  <CaseWorkspaceAsideRow label="Plate" value={claimItem.plateNumber} />
-                  <CaseWorkspaceAsideRow label="Driver" value={claimItem.driverName} />
-                  <CaseWorkspaceAsideRow label="Incident" value={claimItem.dateOfIncident} />
-                  <CaseWorkspaceAsideRow label="PDFs" value={caseFiles.length ? `${caseFiles.length} file(s)` : 'None'} />
-                  <CaseWorkspaceAsideRow label="Purchase" value={partsSummaryText || 'No lines'} />
-                </div>
-              </section>
-
-              <section className="rounded-xl border border-zinc-200/90 bg-white p-3.5 shadow-inner">
-                <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Financials</p>
-                <div className="mt-3 grid gap-2">
-                  <CaseWorkspaceStat label="Repair quote" value={quotePrice != null ? formatAud(quotePrice) : 'Not set'} tone={quotePrice != null ? 'good' : 'warn'} />
-                  <CaseWorkspaceStat label="Insurance approved" value={insuranceApprovedPrice != null ? formatAud(insuranceApprovedPrice) : 'Not set'} tone={insuranceApprovedPrice != null ? 'good' : 'warn'} />
-                  <CaseWorkspaceStat label="Payment" value={paymentStatusLabel(paymentStatus)} tone={paymentStatus === 'completed' ? 'good' : 'warn'} />
-                </div>
-              </section>
-
-              <section className="rounded-xl border border-zinc-200/90 bg-white p-3.5 shadow-inner">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Admin note</p>
-                  {!isModerator ? (
-                    <button
-                      type="button"
-                      onClick={() => setTab('quotes')}
-                      className="text-2xs font-semibold text-indigo-700 hover:text-indigo-900"
-                    >
-                      Edit
-                    </button>
-                  ) : null}
-                </div>
-                <p className="mt-2 text-sm leading-relaxed text-zinc-700">{sidebarNote}</p>
-              </section>
-
-              {!isModerator ? (
-                <section className="rounded-xl border border-zinc-200/90 bg-zinc-50/70 p-3.5 shadow-inner">
-                  <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Quick actions</p>
-                  <div className="mt-3 grid gap-2">
-                    <button
-                      type="button"
-                      onClick={onExport}
-                      className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl border border-zinc-200/90 bg-white px-3 text-xs font-semibold text-zinc-800 shadow-sm transition hover:bg-zinc-50"
-                    >
-                      <Download className="h-3.5 w-3.5" strokeWidth={2} />
-                      Export PDF
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setTab('submission')}
-                      className="inline-flex h-10 items-center justify-center rounded-xl border border-indigo-200 bg-indigo-50 px-3 text-xs font-semibold text-indigo-900 transition hover:bg-indigo-100"
-                    >
-                      Review submission
-                    </button>
-                    {onRequestDelete ? (
-                      <button
-                        type="button"
-                        onClick={openDeleteDialog}
-                        className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3 text-xs font-semibold text-rose-800 transition hover:bg-rose-100"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" strokeWidth={2} />
-                        Delete claim
-                      </button>
-                    ) : null}
-                  </div>
-                </section>
-              ) : null}
-            </div>
-          </aside>
         </div>
 
           {isModerator ? (
