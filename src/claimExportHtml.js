@@ -1,33 +1,29 @@
-/** Full printable HTML export — member payload + admin workspace fields + embedded images. */
+/** Printable member claim report with submitted fields and evidence images. */
 
 import { damageDiagramExportHtml } from './DamageDiagramViewer.jsx';
 import { resolveDamageDiagramFromDamage } from './memberSubmissionUtils.js';
 import { apiBase } from './api.js';
 
-const CHECKLIST_LABELS = {
-  license: 'Driver licence',
-  taxiAuthority: 'Taxi authority',
-  registration: 'Copy of registration',
-  otherDemand: 'Other party demand',
-  policeReport: 'Police report',
-  excessPayment: 'Excess payment',
-  repairQuote: 'Repair quote',
-  otherParties: 'Other parties detail',
-};
-
-function esc(s) {
-  return String(s ?? '')
+function esc(value) {
+  return String(value ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 }
 
-function strVal(v) {
-  if (v == null || v === '') return '—';
-  if (typeof v === 'boolean') return v ? 'Yes' : 'No';
-  if (Array.isArray(v)) return v.filter(Boolean).join(', ') || '—';
-  return String(v);
+function strVal(value) {
+  if (value == null || value === '') return 'Not supplied';
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  if (Array.isArray(value)) return value.filter(Boolean).join(', ') || 'Not supplied';
+  return String(value);
+}
+
+function hasPrintableValue(value) {
+  if (value == null || value === '') return false;
+  if (typeof value === 'boolean' || typeof value === 'number') return true;
+  if (Array.isArray(value)) return value.some(hasPrintableValue);
+  return String(value).trim() !== '';
 }
 
 function mergeLists(...lists) {
@@ -64,13 +60,16 @@ function submissionFromClaim(item) {
   return { payload, data, src, submission };
 }
 
-function fieldRows(pairs) {
-  return pairs
+function fieldRows(pairs, { keepEmptyLabels = [] } = {}) {
+  const required = new Set(keepEmptyLabels);
+  const rows = pairs
+    .filter(([label, value]) => required.has(label) || hasPrintableValue(value))
     .map(
       ([label, value]) =>
         `<tr><th>${esc(label)}</th><td>${esc(strVal(value)).replace(/\n/g, '<br/>')}</td></tr>`,
     )
     .join('');
+  return rows || '<tr><td colspan="2" class="muted">No details supplied.</td></tr>';
 }
 
 function section(title, rowsHtml, extraHtml = '') {
@@ -82,12 +81,24 @@ function section(title, rowsHtml, extraHtml = '') {
     </section>`;
 }
 
+function panel(title, contentHtml) {
+  return `
+    <section class="section">
+      <h2>${esc(title)}</h2>
+      ${contentHtml || '<p class="muted">No details supplied.</p>'}
+    </section>`;
+}
+
+function fileDisplayName(file, groupTitle, index) {
+  return file?.name || file?.originalName || `${groupTitle} ${index + 1}`;
+}
+
 function attachmentImagesHtml(files, groupTitle) {
   const items = Array.isArray(files) ? files : [];
   if (!items.length) return '';
   return items
     .map((file, index) => {
-      const name = esc(file?.name || `${groupTitle} ${index + 1}`);
+      const name = esc(fileDisplayName(file, groupTitle, index));
       const dataUrl = typeof file?.dataUrl === 'string' ? file.dataUrl.trim() : '';
       const storedUrl = typeof file?.url === 'string' ? file.url.trim() : typeof file?.fileUrl === 'string' ? file.fileUrl.trim() : '';
       const href = resolveFileHref(dataUrl || storedUrl);
@@ -95,13 +106,13 @@ function attachmentImagesHtml(files, groupTitle) {
       if (dataUrl.startsWith('data:image/')) {
         return `<figure class="figure"><figcaption>${name}</figcaption><img src="${dataUrl}" alt="${name}" /></figure>`;
       }
-      if (storedUrl && (mimeType.startsWith('image/') || /\.(jpe?g|png|gif|webp|bmp|heic|heif)(?:$|\?)/i.test(storedUrl))) {
+      if (storedUrl && (mimeType.startsWith('image/') || /\.(jpe?g|png|gif|webp|bmp|heic|heif|avif)(?:$|\?)/i.test(storedUrl))) {
         return `<figure class="figure"><figcaption>${name}</figcaption><img src="${esc(href)}" alt="${name}" /></figure>`;
       }
-      if (dataUrl.startsWith('data:application/pdf')) {
-        return `<figure class="figure"><figcaption>${name}</figcaption><p class="muted">PDF attached — open this claim in the admin portal to download the file.</p></figure>`;
+      if (dataUrl.startsWith('data:application/pdf') || /\.pdf(?:$|\?)/i.test(storedUrl)) {
+        return `<figure class="figure file-card"><figcaption>${name}</figcaption><p>PDF attached. Open the claim in admin to view or download the original file.</p></figure>`;
       }
-      return `<figure class="figure"><figcaption>${name}</figcaption><p class="muted">Filename recorded${file?.source ? ` (${esc(file.source)})` : ''}. No preview stored.</p></figure>`;
+      return `<figure class="figure file-card"><figcaption>${name}</figcaption><p>File recorded${file?.source ? ` (${esc(file.source)})` : ''}. Preview unavailable.</p></figure>`;
     })
     .join('');
 }
@@ -109,7 +120,7 @@ function attachmentImagesHtml(files, groupTitle) {
 function gallerySection(title, files) {
   const html = attachmentImagesHtml(files, title);
   if (!html) return '';
-  return `<section class="section"><h2>${esc(title)}</h2><div class="gallery">${html}</div></section>`;
+  return panel(title, `<div class="gallery">${html}</div>`);
 }
 
 function normalizeWitnesses(data, payload) {
@@ -119,17 +130,43 @@ function normalizeWitnesses(data, payload) {
   return [
     { name: w.witness1Name, address: w.witness1Address, mobile: w.witness1Mobile, email: w.witness1Email },
     { name: w.witness2Name, address: w.witness2Address, mobile: w.witness2Mobile, email: w.witness2Email },
-  ].filter((x) => x.name || x.address || x.mobile || x.email);
+  ].filter((item) => item.name || item.address || item.mobile || item.email);
+}
+
+function evidenceIndex(items) {
+  const rows = items
+    .filter((item) => item.count > 0 || item.required)
+    .map(
+      (item) => `
+        <div class="evidence-item ${item.count > 0 ? 'is-complete' : 'is-missing'}">
+          <span>${esc(item.label)}</span>
+          <strong>${item.count > 0 ? `${item.count} file${item.count === 1 ? '' : 's'}` : 'Not supplied'}</strong>
+        </div>`,
+    )
+    .join('');
+  return rows ? `<div class="evidence-index">${rows}</div>` : '<p class="muted">No evidence files supplied.</p>';
+}
+
+function peoplePanels(title, people, buildRows) {
+  if (!people.length) return section(title, fieldRows([[title, 'None recorded']], { keepEmptyLabels: [title] }));
+  const html = people
+    .map((person, index) => `
+      <div class="subpanel">
+        <h3>${esc(`${title.replace(/s$/, '')} ${index + 1}`)}</h3>
+        <table class="fields">${fieldRows(buildRows(person))}</table>
+      </div>`)
+    .join('');
+  return panel(title, html);
 }
 
 /**
- * @param {object} item — claim row from admin API (must include payload when possible)
+ * @param {object} item - claim row from admin API, including payload where available.
  * @param {{ refSummary: string, formatAud: (n:number)=>string, paymentLabel: string }} meta
  */
 export function buildClaimExportHtml(item, meta) {
   const { payload, data, src, submission } = submissionFromClaim(item);
   if (!payload) {
-    return `<html><body><p>No member submission payload stored for this claim.</p></body></html>`;
+    return '<html><body><p>No member submission payload stored for this claim.</p></body></html>';
   }
 
   const mv = { ...(data.memberVehicle || {}), ...(src.memberVehicle || {}) };
@@ -137,7 +174,8 @@ export function buildClaimExportHtml(item, meta) {
   const inc = { ...(data.incident || {}), ...(src.incident || {}) };
   const dmg = { ...(data.damage || {}), ...(src.damage || {}) };
   const diagram = dmg.diagram || {};
-  const checklist = { ...(submission.checklist || {}), ...(src.checklist || {}) };
+  const sketch = src.accidentSketch || {};
+  const declaration = src.declaration || {};
 
   const licenseFront = mergeLists(src.driverLicenseFrontAttachments, submission.driverLicenseFrontAttachments);
   const licenseBack = mergeLists(src.driverLicenseBackAttachments, submission.driverLicenseBackAttachments);
@@ -145,179 +183,131 @@ export function buildClaimExportHtml(item, meta) {
   const regFiles = mergeLists(src.registrationAttachments, submission.registrationAttachments);
   const scenePhotos = mergeLists(diagram.scenePhotos);
   const detailPhotos = mergeLists(diagram.detailPhotos);
-  const sketchUploads = mergeLists(src.accidentSketch?.attachments);
-  const parties = src.otherParties || data.otherParties || [];
+  const sketchUploads = mergeLists(sketch.attachments);
+  const signatureFiles = declaration.signatureDataUrl ? [{ name: 'Declaration signature', dataUrl: declaration.signatureDataUrl }] : [];
+  const parties = Array.isArray(src.otherParties || data.otherParties) ? src.otherParties || data.otherParties : [];
   const witnesses = normalizeWitnesses(data, payload);
-
-  const checklistRows = Object.entries(CHECKLIST_LABELS)
-    .map(([key, label]) => [label, checklist[key] ? 'Selected' : 'Not selected'])
-    .concat([
-      ['Excess applicability', src.excessPaymentApplicability || submission.excessPaymentApplicability],
-      ['Excess amount', src.excessPaymentAmount || submission.excessPaymentAmount],
-      ['Repair quote ref.', src.repairQuoteRef || submission.repairQuoteRef],
-    ]);
-
-  const quoteOptions = item.quoteOptions ?? [];
-  const primaryQuote = quoteOptions.find((q) => q.id === item.primaryQuoteId);
-  const finalQuote = quoteOptions.find((q) => q.id === item.finalQuoteId);
-  const parts = item.parts ?? [];
-  const caseFiles = item.caseFiles ?? [];
-
-  const partySections = parties
-    .map((party, i) => {
-      const front = mergeLists(party.licenceFrontAttachments);
-      const back = mergeLists(party.licenceBackAttachments);
-      return (
-        section(
-          `Other party ${i + 1}`,
-          fieldRows([
-            ['Plate', party.plateNumber],
-            ['Make / model / colour', [party.make, party.model, party.color].filter(Boolean).join(' / ')],
-            ['Driver', party.driverName],
-            ['Owner', party.ownerDetails],
-            ['Address', party.address],
-            ['Contact', [party.mobile, party.email].filter(Boolean).join(' · ')],
-            ['Licence', party.licenceNumber],
-            ['Insurance', party.insuranceCompany],
-            ['Claim no.', party.claimNumber],
-          ]),
-        ) +
-        gallerySection(`Party ${i + 1} — licence front`, front) +
-        gallerySection(`Party ${i + 1} — licence back`, back)
-      );
-    })
-    .join('');
-
-  const witnessSections =
-    witnesses.length > 0
-      ? witnesses
-          .map((w, i) =>
-            section(
-              `Witness ${i + 1}`,
-              fieldRows([
-                ['Name', w.name],
-                ['Address', w.address],
-                ['Mobile', w.mobile],
-                ['Email', w.email],
-              ]),
-            ),
-          )
-          .join('')
-      : section('Witnesses', fieldRows([['Witnesses', 'None recorded']]));
-
-  const partsRows =
-    parts.length > 0
-      ? parts
-          .map(
-            (p, i) =>
-              `<tr>
-                <td>${i + 1}</td>
-                <td>${esc(p.company)}</td>
-                <td>${esc(p.partName)}</td>
-                <td>${esc(meta.formatAud(p.amount))}</td>
-                <td>${p.quotePrice == null ? '—' : esc(meta.formatAud(p.quotePrice))}</td>
-                <td>${p.quotePrice == null ? '—' : esc(meta.formatAud((Number(p.amount) || 0) - (Number(p.quotePrice) || 0)))}</td>
-                <td>${esc(p.orderDate)}</td>
-                <td>${esc(p.status)}</td>
-              </tr>`,
-          )
-          .join('')
-      : '<tr><td colspan="8">No purchase lines.</td></tr>';
-
   const diagramResolved = resolveDamageDiagramFromDamage(dmg);
-  const markerCount = diagramResolved.markers.length;
-  const strokeCount = diagramResolved.strokes.length;
 
-  const body = `
-    <header>
-      <h1>Horizon Smash Repairs — Full claim export</h1>
+  const evidenceItems = [
+    { label: 'Driver licence front', count: licenseFront.length, required: true },
+    { label: 'Driver licence back', count: licenseBack.length, required: true },
+    { label: 'Registration', count: regFiles.length, required: true },
+    { label: 'Taxi authority', count: taxiFiles.length, required: false },
+    { label: 'Accident sketch', count: (sketch.diagramDataUrl ? 1 : 0) + sketchUploads.length, required: false },
+    { label: 'Damage photos', count: scenePhotos.length + detailPhotos.length, required: true },
+    { label: 'Declaration signature', count: signatureFiles.length, required: true },
+  ];
+
+  const summaryRows = fieldRows(
+    [
+      ['Claim reference', item.intakeReference],
+      ['System reference', item.systemReference],
+      ['Plate', item.plateNumber || mv.plateNumber],
+      ['Driver', item.driverName || dr.name || [dr.firstName, dr.lastName].filter(Boolean).join(' ')],
+      ['Incident date', item.dateOfIncident || inc.date],
+      ['Submitted', item.submittedAt || item.createdAt],
+    ],
+    { keepEmptyLabels: ['Claim reference', 'Plate', 'Driver', 'Incident date'] },
+  );
+
+  const reportBody = `
+    <header class="cover">
+      <p class="eyebrow">Member Claim Report</p>
+      <h1>Horizon Smash Repairs</h1>
       <p class="ref">${esc(meta.refSummary)}</p>
-      <p class="meta">
-        <strong>Plate:</strong> ${esc(item.plateNumber)} ·
-        <strong>Driver:</strong> ${esc(item.driverName)} ·
-        <strong>Status:</strong> ${esc(item.status)} ·
-        <strong>Incident:</strong> ${esc(item.dateOfIncident)} ·
-        <strong>Exported:</strong> ${esc(new Date().toLocaleString())}
-      </p>
+      <div class="cover-meta">
+        <div><span>Plate</span><strong>${esc(item.plateNumber || mv.plateNumber || 'Not supplied')}</strong></div>
+        <div><span>Driver</span><strong>${esc(item.driverName || dr.name || 'Not supplied')}</strong></div>
+        <div><span>Incident</span><strong>${esc(item.dateOfIncident || inc.date || 'Not supplied')}</strong></div>
+        <div><span>Exported</span><strong>${esc(new Date().toLocaleString())}</strong></div>
+      </div>
     </header>
 
-    ${section('1. Checklist & documents', fieldRows(checklistRows))}
-    ${gallerySection('Driver licence — front', licenseFront)}
-    ${gallerySection('Driver licence — back', licenseBack)}
-    ${gallerySection('Taxi authority', taxiFiles)}
-    ${gallerySection('Copy of registration', regFiles)}
+    ${section('1. Claim summary', summaryRows)}
+    ${panel('2. Evidence index', evidenceIndex(evidenceItems))}
 
     ${section(
-      '2. Member & vehicle',
-      fieldRows([
-        ['Member number', mv.memberNumber],
-        ['Claim type', mv.claimType],
-        ['Plate', mv.plateNumber],
-        ['Make', mv.make],
-        ['Model', mv.model],
-        ['Kilometers', mv.kilometers],
-        ['Month / year', mv.monthYear],
-        ['Owner', mv.ownerName],
-        ['Address', mv.address],
-        ['Mobile', mv.mobile],
-        ['Email', mv.email],
-      ]),
-    )}
-
-    ${section(
-      '3. Driver',
-      fieldRows([
-        ['Name', dr.name || [dr.firstName, dr.lastName].filter(Boolean).join(' ')],
-        ['Is owner', dr.isOwner],
-        ['Address', dr.address || [dr.streetAddress, dr.suburb, dr.state, dr.postcode].filter(Boolean).join(', ')],
-        ['Mobile', dr.mobile],
-        ['Email', dr.email],
-        ['Licence no.', dr.licenceNumber],
-        ['Licence expiry', dr.expiryDate],
-        ['Date of birth', dr.dateOfBirth],
-        ['Years held', dr.yearOfHold],
-        ['Relationship', dr.relationship],
-        ['Alcohol / drugs', dr.alcoholOrDrug],
-        ['Breath test', dr.breathTest],
-        ['Police reported', dr.policeReported],
-        ['Police report no.', dr.policeReportNumber],
-        ['At fault', dr.atFault],
-        ['Admitted liability', dr.admittedLiability],
-        ['Other driver liability', dr.otherDriverAdmittedLiability],
-      ]),
-    )}
-
-    ${section(
-      '4. Incident',
-      fieldRows([
-        ['Date', inc.date],
-        ['Day', inc.day],
-        ['Time', inc.time],
-        ['Street', inc.streetName],
-        ['Suburb', inc.suburb],
-        ['Address detail', inc.addressDetailOptional],
-        ['Road surface', inc.roadSurface],
-        ['Vehicle state', inc.coveredVehicleState],
-        ['Traffic controls', inc.trafficControls],
-        ['Other vehicles', inc.numberOfVehicles],
-        ['Your speed', inc.estimatedSpeed],
-        ['Other speed', inc.estimatedOtherSpeed],
-        ['Description', inc.description],
-      ]),
-    )}
-
-    ${section(
-      '5. Accident sketch',
-      fieldRows([['Canvas diagram', src.accidentSketch?.diagramDataUrl ? 'Yes' : 'No']]),
-      attachmentImagesHtml(
-        src.accidentSketch?.diagramDataUrl ? [{ name: 'Sketch canvas', dataUrl: src.accidentSketch.diagramDataUrl }] : [],
-        'Sketch',
+      '3. Member and vehicle',
+      fieldRows(
+        [
+          ['Member number', mv.memberNumber],
+          ['Claim type', mv.claimType],
+          ['Plate', mv.plateNumber],
+          ['Make', mv.make],
+          ['Model', mv.model],
+          ['Kilometers', mv.kilometers],
+          ['Month / year', mv.monthYear],
+          ['Owner', mv.ownerName],
+          ['Address', mv.address],
+          ['Mobile', mv.mobile],
+          ['Email', mv.email],
+        ],
+        { keepEmptyLabels: ['Plate', 'Owner'] },
       ),
+    )}
+    ${gallerySection('Registration evidence', regFiles)}
+
+    ${section(
+      '4. Driver',
+      fieldRows(
+        [
+          ['Name', dr.name || [dr.firstName, dr.lastName].filter(Boolean).join(' ')],
+          ['Is owner', dr.isOwner],
+          ['Address', dr.address || [dr.streetAddress, dr.suburb, dr.state, dr.postcode].filter(Boolean).join(', ')],
+          ['Mobile', dr.mobile],
+          ['Email', dr.email],
+          ['Licence no.', dr.licenceNumber],
+          ['Licence expiry', dr.expiryDate],
+          ['Date of birth', dr.dateOfBirth],
+          ['Years held', dr.yearOfHold],
+          ['Relationship', dr.relationship],
+          ['Alcohol / drugs', dr.alcoholOrDrug],
+          ['Breath test', dr.breathTest],
+          ['Police reported', dr.policeReported],
+          ['Police report no.', dr.policeReportNumber],
+          ['At fault', dr.atFault],
+          ['Admitted liability', dr.admittedLiability],
+          ['Other driver liability', dr.otherDriverAdmittedLiability],
+        ],
+        { keepEmptyLabels: ['Name', 'Licence no.'] },
+      ),
+    )}
+    ${gallerySection('Driver licence - front', licenseFront)}
+    ${gallerySection('Driver licence - back', licenseBack)}
+    ${gallerySection('Taxi authority', taxiFiles)}
+
+    ${section(
+      '5. Incident',
+      fieldRows(
+        [
+          ['Date', inc.date],
+          ['Day', inc.day],
+          ['Time', inc.time],
+          ['Street', inc.streetName],
+          ['Suburb', inc.suburb],
+          ['Address detail', inc.addressDetailOptional],
+          ['Road surface', inc.roadSurface],
+          ['Vehicle state', inc.coveredVehicleState],
+          ['Traffic controls', inc.trafficControls],
+          ['Other vehicles', inc.numberOfVehicles],
+          ['Your speed', inc.estimatedSpeed],
+          ['Other speed', inc.estimatedOtherSpeed],
+          ['Description', inc.description],
+        ],
+        { keepEmptyLabels: ['Date', 'Description'] },
+      ),
+    )}
+
+    ${section(
+      '6. Accident sketch',
+      fieldRows([['Canvas diagram', sketch.diagramDataUrl ? 'Yes' : 'No']]),
+      attachmentImagesHtml(sketch.diagramDataUrl ? [{ name: 'Sketch canvas', dataUrl: sketch.diagramDataUrl }] : [], 'Sketch canvas'),
     )}
     ${gallerySection('Sketch uploads', sketchUploads)}
 
     ${section(
-      '6. Damage & towing',
+      '7. Damage and towing',
       fieldRows([
         ['Claiming damage', dmg.claimingDamage],
         ['Towed', dmg.towed],
@@ -325,79 +315,91 @@ export function buildClaimExportHtml(item, meta) {
         ['Tow location', dmg.towLocation],
         ['Distance towed', dmg.distanceTowed],
         ['Vehicle location', dmg.currentVehicleLocation],
-        ['Damage markers', markerCount],
-        ['Damage drawings', strokeCount],
+        ['Damage markers', diagramResolved.markers.length],
+        ['Damage drawings', diagramResolved.strokes.length],
       ]),
     )}
     ${damageDiagramExportHtml(dmg)}
-    ${gallerySection('Damage — scene photos', scenePhotos)}
-    ${gallerySection('Damage — close-up photos', detailPhotos)}
+    ${gallerySection('Damage - scene photos', scenePhotos)}
+    ${gallerySection('Damage - close-up photos', detailPhotos)}
 
-    ${partySections || section('7. Other parties', fieldRows([['Other parties', 'None recorded']]))}
-    ${witnessSections}
+    ${peoplePanels('8. Other parties', parties, (party) => [
+      ['Plate', party.plateNumber],
+      ['Make / model / colour', [party.make, party.model, party.color].filter(Boolean).join(' / ')],
+      ['Driver', party.driverName],
+      ['Owner', party.ownerDetails],
+      ['Address', party.address],
+      ['Contact', [party.mobile, party.email].filter(Boolean).join(' / ')],
+      ['Licence', party.licenceNumber],
+      ['Insurance', party.insuranceCompany],
+      ['Claim no.', party.claimNumber],
+    ])}
+
+    ${peoplePanels('9. Witnesses', witnesses, (witness) => [
+      ['Name', witness.name],
+      ['Address', witness.address],
+      ['Mobile', witness.mobile],
+      ['Email', witness.email],
+    ])}
 
     ${section(
-      '9. Declaration',
-      fieldRows([
-        ['Agreed', src.declaration?.agreed],
-        ['Signed by', src.declaration?.signedBy],
-        ['Print name', src.declaration?.typedName],
-        ['Date', src.declaration?.date],
-      ]),
-      attachmentImagesHtml(
-        src.declaration?.signatureDataUrl ? [{ name: 'Signature', dataUrl: src.declaration.signatureDataUrl }] : [],
-        'Signature',
+      '10. Declaration',
+      fieldRows(
+        [
+          ['Agreed', declaration.agreed],
+          ['Signed by', declaration.signedBy],
+          ['Print name', declaration.typedName],
+          ['Date', declaration.date],
+        ],
+        { keepEmptyLabels: ['Agreed', 'Print name'] },
       ),
+      attachmentImagesHtml(signatureFiles, 'Signature'),
     )}
-
-    ${section(
-      '10. Admin workspace',
-      fieldRows([
-        ['Quote price', item.quotePrice != null ? meta.formatAud(item.quotePrice) : '—'],
-        ['Insurance price', item.insuranceApprovedPrice != null ? meta.formatAud(item.insuranceApprovedPrice) : '—'],
-        ['Primary quote', primaryQuote ? `${primaryQuote.supplier} (${meta.formatAud(primaryQuote.amount)})` : '—'],
-        ['Final quote', finalQuote ? `${finalQuote.supplier} (${meta.formatAud(finalQuote.amount)})` : '—'],
-        ['Payment status', meta.paymentLabel],
-        ['Admin note', item.adminNote || '—'],
-        ['Case PDF files', caseFiles.length ? caseFiles.map((f) => f.name).join(', ') : '—'],
-      ]),
-    )}
-
-    <section class="section">
-      <h2>11. Purchase lines</h2>
-      <table class="parts">
-        <thead><tr><th>#</th><th>Supplier</th><th>Part</th><th>Amount</th><th>Quote</th><th>Difference</th><th>Order</th><th>Status</th></tr></thead>
-        <tbody>${partsRows}</tbody>
-      </table>
-    </section>
   `;
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Claim ${esc(item.intakeReference || item.plateNumber)}</title>
+  <title>Claim ${esc(item.intakeReference || item.plateNumber || 'report')}</title>
   <style>
-    @page { margin: 14mm; }
-    body { font-family: Inter, system-ui, sans-serif; color: #0f172a; font-size: 12px; line-height: 1.45; margin: 0; padding: 24px; }
-    h1 { font-size: 20px; margin: 0 0 6px; }
-    h2 { font-size: 14px; margin: 0 0 10px; color: #0f766e; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }
-    .ref { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.06em; }
-    .meta { color: #475569; font-size: 12px; margin: 12px 0 24px; }
-    .section { margin-top: 22px; break-inside: avoid-page; }
+    @page { margin: 12mm; }
+    * { box-sizing: border-box; }
+    body { max-width: 980px; margin: 0 auto; padding: 26px 28px 34px; font-family: Inter, Arial, sans-serif; color: #0f172a; font-size: 12px; line-height: 1.45; background: #fff; }
+    .cover { text-align: center; border: 1px solid #dbe7e4; border-top: 4px solid #0f766e; border-radius: 10px; padding: 20px 22px 18px; margin-bottom: 22px; break-inside: avoid; page-break-inside: avoid; }
+    h1 { font-size: 25px; line-height: 1.1; margin: 2px 0 8px; color: #0f172a; }
+    .eyebrow { margin: 0; color: #0f766e; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.12em; }
+    h2 { font-size: 14px; margin: 0 0 10px; color: #0f766e; border-bottom: 1px solid #dbe7e4; padding-bottom: 7px; }
+    h3 { margin: 0 0 8px; font-size: 12px; color: #111827; }
+    .ref { margin: 0; font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: 0.06em; }
+    .cover-meta { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 16px; text-align: left; }
+    .cover-meta div, .evidence-item, .subpanel { border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc; }
+    .cover-meta div { padding: 9px 10px; min-height: 52px; }
+    .cover-meta span, .evidence-item span { display: block; margin-bottom: 3px; color: #64748b; font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; }
+    .cover-meta strong, .evidence-item strong { display: block; color: #111827; font-size: 12px; line-height: 1.25; overflow-wrap: anywhere; }
+    .section { margin-top: 18px; padding-top: 2px; break-inside: avoid-page; page-break-inside: avoid; }
+    .subpanel { padding: 12px; margin-top: 10px; background: #fff; }
+    .evidence-index { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .evidence-item { padding: 9px 10px; }
+    .evidence-item.is-complete { border-color: #a7f3d0; background: #ecfdf5; }
+    .evidence-item.is-missing { border-color: #fed7aa; background: #fff7ed; }
     table.fields { width: 100%; border-collapse: collapse; }
-    table.fields th { text-align: left; vertical-align: top; width: 34%; padding: 6px 10px 6px 0; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; }
-    table.fields td { padding: 6px 0; border-bottom: 1px solid #f1f5f9; }
-    table.parts { width: 100%; border-collapse: collapse; font-size: 11px; }
-    table.parts th, table.parts td { border: 1px solid #e2e8f0; padding: 6px 8px; text-align: left; }
-    .gallery { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-    .figure { margin: 0; padding: 10px; border: 1px solid #e2e8f0; border-radius: 8px; background: #fafafa; break-inside: avoid; }
-    .figure img { display: block; width: 100%; max-height: 320px; object-fit: contain; margin-top: 8px; }
-    figcaption { font-size: 10px; font-weight: 600; color: #475569; }
+    table.fields th { text-align: left; vertical-align: top; width: 30%; padding: 7px 14px 7px 0; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: #64748b; border-bottom: 1px solid #edf2f7; }
+    table.fields td { padding: 7px 0; border-bottom: 1px solid #edf2f7; color: #111827; overflow-wrap: anywhere; }
+    .gallery { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; align-items: start; }
+    .figure { margin: 0; padding: 9px; border: 1px solid #e2e8f0; border-radius: 8px; background: #fafafa; break-inside: avoid; page-break-inside: avoid; }
+    .figure img { display: block; width: 100%; max-height: 245px; object-fit: contain; margin-top: 7px; border-radius: 5px; background: #fff; }
+    .file-card p { margin: 8px 0 0; color: #475569; }
+    figcaption { font-size: 9px; font-weight: 700; color: #475569; overflow-wrap: anywhere; }
     .muted { color: #64748b; font-size: 11px; margin: 8px 0 0; }
+    @media print {
+      body { max-width: none; padding: 0; }
+      .cover { border-radius: 0; }
+      .figure img { max-height: 230px; }
+    }
   </style>
 </head>
-<body>${body}</body>
+<body>${reportBody}</body>
 </html>`;
 }
 

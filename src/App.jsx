@@ -2027,6 +2027,45 @@ function PaymentStatusBadge({ status }) {
   );
 }
 
+function PdfPreviewDialog({ open, title, html, onClose, onPrint }) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-zinc-950/65 p-3 backdrop-blur-sm">
+      <div className="flex h-full w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sheet-lg">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+          <div className="min-w-0">
+            <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">PDF preview</p>
+            <h3 className="mt-0.5 truncate text-sm font-semibold text-zinc-950">{title || 'Claim export'}</h3>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={onPrint}
+              className="inline-flex h-9 items-center gap-2 rounded-lg bg-zinc-950 px-3 text-2xs font-semibold text-white shadow-sm transition hover:bg-zinc-800"
+            >
+              <Download className="h-3.5 w-3.5" strokeWidth={2} />
+              Print / Save PDF
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-600 shadow-sm transition hover:bg-zinc-50 hover:text-zinc-900"
+              aria-label="Close PDF preview"
+            >
+              <X className="h-4 w-4" strokeWidth={2} />
+            </button>
+          </div>
+        </div>
+        <iframe
+          title={title || 'Claim PDF preview'}
+          srcDoc={html}
+          className="min-h-0 flex-1 bg-white"
+        />
+      </div>
+    </div>
+  );
+}
+
 function AttentionSummary({ signals, compact = false }) {
   const level = signals?.attentionLevel || 'low';
   const styles =
@@ -2258,6 +2297,21 @@ function CaseWorkspaceStat({ label, value, tone = 'default' }) {
   );
 }
 
+function CaseFactChip({ label, value, tone = 'default' }) {
+  const toneClass =
+    tone === 'good'
+      ? 'border-emerald-200 bg-emerald-50/80 text-emerald-950'
+      : tone === 'warn'
+        ? 'border-amber-200 bg-amber-50/90 text-amber-950'
+        : 'border-zinc-200/90 bg-white text-zinc-900';
+  return (
+    <div className={`flex min-w-[9.5rem] items-center justify-between gap-3 rounded-lg border px-2.5 py-1.5 shadow-inner ${toneClass}`}>
+      <span className="shrink-0 text-[9px] font-semibold uppercase tracking-wider opacity-65">{label}</span>
+      <span className="truncate text-right text-xs font-semibold">{value || '—'}</span>
+    </div>
+  );
+}
+
 function CaseWorkspaceAsideRow({ label, value }) {
   return (
     <div className="flex items-start justify-between gap-3 border-b border-zinc-100 py-2.5 last:border-b-0">
@@ -2324,6 +2378,7 @@ function ClaimModal({
   );
   const [paymentSave, setPaymentSave] = useState('idle');
   const [paymentSaveKind, setPaymentSaveKind] = useState(null);
+  const [pdfPreviewOpen, setPdfPreviewOpen] = useState(false);
   const isModerator = role === 'moderator';
   const fileInputRef = useRef(null);
   const tabRailRef = useRef(null);
@@ -2762,6 +2817,12 @@ function ClaimModal({
       : insuranceApprovedPrice != null
         ? formatAud(insuranceApprovedPrice)
         : 'Not set';
+  const exportHtml = buildClaimExportHtml(claimItem, {
+    refSummary: claimExportRefSummary(claimItem),
+    formatAud,
+    paymentLabel: paymentStatusLabel(claimItem.paymentStatus),
+  });
+  const previewTitle = `Claim ${claimItem.intakeReference || claimRef(claimItem) || ''}`.trim();
 
   return (
     <div className="fixed inset-0 z-50 flex bg-zinc-950/55 p-0 backdrop-blur-sm lg:p-3">
@@ -2827,11 +2888,13 @@ function ClaimModal({
           </div>
         </div>
 
-        <div className="grid shrink-0 grid-cols-2 gap-2 border-b border-zinc-200/90 bg-zinc-50/80 px-3 py-2 sm:px-5 lg:grid-cols-4">
-          <CaseWorkspaceStat label="Submitted" value={claimItem.submittedAt} />
-          <CaseWorkspaceStat label="Incident" value={claimItem.dateOfIncident} />
-          <CaseWorkspaceStat label="Quote" value={quoteSummary} tone={quotePrice != null || insuranceApprovedPrice != null ? 'good' : 'warn'} />
-          <CaseWorkspaceStat label="Payment" value={paymentStatusLabel(paymentStatus)} tone={paymentStatus === 'completed' ? 'good' : 'warn'} />
+        <div className="shrink-0 border-b border-zinc-200/90 bg-zinc-50/80 px-3 py-1.5 sm:px-5">
+          <div className="scrollbar-none flex gap-2 overflow-x-auto lg:grid lg:grid-cols-4 lg:overflow-visible">
+            <CaseFactChip label="Submitted" value={claimItem.submittedAt} />
+            <CaseFactChip label="Incident" value={claimItem.dateOfIncident} />
+            <CaseFactChip label="Quote" value={quoteSummary} tone={quotePrice != null || insuranceApprovedPrice != null ? 'good' : 'warn'} />
+            <CaseFactChip label="Payment" value={paymentStatusLabel(paymentStatus)} tone={paymentStatus === 'completed' ? 'good' : 'warn'} />
+          </div>
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
@@ -3987,6 +4050,14 @@ function ClaimModal({
           </main>
         </div>
 
+        <PdfPreviewDialog
+          open={pdfPreviewOpen}
+          title={previewTitle}
+          html={exportHtml}
+          onClose={() => setPdfPreviewOpen(false)}
+          onPrint={() => openClaimExportPrint(exportHtml)}
+        />
+
           {isModerator ? (
             <div className="flex shrink-0 flex-col gap-3 border-t border-zinc-200/90 bg-zinc-50/95 px-4 py-4 backdrop-blur-sm sm:flex-row sm:items-center sm:justify-between sm:px-6">
               <p className="text-2xs leading-relaxed text-zinc-600 sm:max-w-xl sm:text-xs">
@@ -4022,6 +4093,14 @@ function ClaimModal({
                 </p>
               </div>
               <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-thin sm:flex-wrap sm:justify-end sm:overflow-visible sm:pb-0">
+                <button
+                  type="button"
+                  onClick={() => setPdfPreviewOpen(true)}
+                  className="inline-flex h-10 min-w-[8rem] flex-none items-center justify-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3 text-xs font-semibold text-indigo-900 shadow-sm transition hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80"
+                >
+                  <FileSearch className="h-3.5 w-3.5" strokeWidth={2} />
+                  Preview PDF
+                </button>
                 <button
                   type="button"
                   onClick={onExport}
