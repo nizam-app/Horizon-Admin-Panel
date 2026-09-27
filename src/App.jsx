@@ -30,6 +30,7 @@ import * as api from './api.js';
 import { DamageDiagramViewer } from './DamageDiagramViewer.jsx';
 import { AttachmentPreview, SubmissionImage, MemberSubmissionPanel } from './MemberSubmissionPanel.jsx';
 import { buildClaimExportHtml, openClaimExportPrint } from './claimExportHtml.js';
+import { BuyerPdfClaimModal } from './BuyerPdfClaimModal.jsx';
 import {
   mergeAttachmentLists,
   resolveChecklistFlag,
@@ -1167,6 +1168,12 @@ function App() {
   const [claimDeleteError, setClaimDeleteError] = useState('');
   const [statusFilter, setStatusFilter] = useState('All');
   const [workspaceSave, setWorkspaceSave] = useState('idle');
+  const [buyerPdfModalOpen, setBuyerPdfModalOpen] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalClaims, setTotalClaims] = useState(0);
+  const [statusTotals, setStatusTotals] = useState({});
+  const PAGE_SIZE = 20;
 
   const persistTimersRef = useRef({});
   const persistWorkspaceBodiesRef = useRef({});
@@ -1184,14 +1191,16 @@ function App() {
   }, []);
 
   const loadClaims = useCallback(
-    async (token, { status = statusFilter, q = searchTerm } = {}) => {
-      const rows = await api.listClaims(token, {
+    async (token, { status = statusFilter, q = searchTerm, page = currentPage } = {}) => {
+      return api.listClaims(token, {
         status,
         q: String(q || '').trim() || undefined,
+        page,
+        limit: PAGE_SIZE,
       });
-      return rows.map(api.claimFromApi);
     },
-    [statusFilter, searchTerm]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [statusFilter, searchTerm, currentPage]
   );
 
   const applyClaimFromServer = useCallback((serverClaim) => {
@@ -1418,8 +1427,13 @@ function App() {
       setClaimsLoading(true);
       setClaimsError('');
       try {
-        const mapped = await loadClaims(session.token);
-        if (!cancelled) setClaims(mapped);
+        const result = await loadClaims(session.token);
+        if (!cancelled) {
+          setClaims(result.claims);
+          setTotalClaims(result.total);
+          setTotalPages(result.totalPages);
+          setStatusTotals(result.statusTotals);
+        }
       } catch (e) {
         if (!cancelled) {
           if (e instanceof api.ApiAuthError) logout();
@@ -1433,13 +1447,18 @@ function App() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [session?.token, statusFilter, searchTerm, loadClaims, logout]);
+  }, [session?.token, statusFilter, searchTerm, currentPage, loadClaims, logout]);
 
   useEffect(() => {
     if (!session?.token) return;
     const onFocus = () => {
       loadClaims(session.token)
-        .then(setClaims)
+        .then((result) => {
+          setClaims(result.claims);
+          setTotalClaims(result.total);
+          setTotalPages(result.totalPages);
+          setStatusTotals(result.statusTotals);
+        })
         .catch((e) => {
           if (e instanceof api.ApiAuthError) logout();
         });
@@ -1458,13 +1477,16 @@ function App() {
   }, [selectedClaim, closeClaimModal]);
 
   const metrics = useMemo(() => {
-    const pending = claims.filter((item) => item.status === 'Pending Review').length;
-    const approved = claims.filter((item) => item.status === 'Approved').length;
-    const rejected = claims.filter((item) => item.status === 'Rejected').length;
-    const litigation = claims.filter((item) => item.status === 'Litigation').length;
-    const recovery = claims.filter((item) => item.status === 'Recovery').length;
-    return { total: claims.length, pending, approved, rejected, litigation, recovery };
-  }, [claims]);
+    const t = statusTotals;
+    return {
+      total: (t['Pending Review'] ?? 0) + (t['Approved'] ?? 0) + (t['Rejected'] ?? 0) + (t['Litigation'] ?? 0) + (t['Recovery'] ?? 0),
+      pending: t['Pending Review'] ?? 0,
+      approved: t['Approved'] ?? 0,
+      rejected: t['Rejected'] ?? 0,
+      litigation: t['Litigation'] ?? 0,
+      recovery: t['Recovery'] ?? 0,
+    };
+  }, [statusTotals]);
 
   const filteredClaims = claims;
 
@@ -1656,9 +1678,6 @@ function App() {
             {claimsError ? (
               <div className="mb-5 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">{claimsError}</div>
             ) : null}
-            {claimsLoading ? (
-              <div className="mb-5 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-700">Loading claims from API…</div>
-            ) : null}
             {isModerator && (
               <div className="mb-5 flex items-start gap-3 rounded-xl border border-indigo-200/80 bg-gradient-to-r from-indigo-50/90 to-white px-4 py-3 shadow-card sm:items-center sm:px-5">
                 <span className="mt-0.5 shrink-0 rounded-lg border border-indigo-300/80 bg-white px-2 py-0.5 text-2xs font-bold uppercase tracking-wide text-indigo-900 shadow-sm sm:mt-0">
@@ -1725,7 +1744,7 @@ function App() {
                         <QueueMetricChip label="Total" value={metrics.total} />
                         <QueueMetricChip label="Pending" value={metrics.pending} tone="warn" />
                         <QueueMetricChip label="Approved" value={metrics.approved} tone="good" />
-                        <QueueMetricChip label="Filtered" value={filteredClaims.length} />
+                        <QueueMetricChip label="Filtered" value={totalClaims} />
                       </div>
                       <div className="flex flex-wrap gap-2">
                         {metrics.rejected ? <QueueMetricChip label="Rejected" value={metrics.rejected} tone="danger" /> : null}
@@ -1734,6 +1753,16 @@ function App() {
                       </div>
                     </div>
                     <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center xl:w-auto xl:max-w-3xl">
+                      {!isModerator ? (
+                        <button
+                          type="button"
+                          onClick={() => setBuyerPdfModalOpen(true)}
+                          className="inline-flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-3 text-[13px] font-semibold text-white shadow-sm transition hover:bg-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-1"
+                        >
+                          <Plus className="h-4 w-4" strokeWidth={2} />
+                          New claim
+                        </button>
+                      ) : null}
                       <label className="group relative min-w-0 flex-1 sm:max-w-xs lg:max-w-[280px]">
                         <span className="sr-only">Search claims</span>
                         <Search
@@ -1743,7 +1772,7 @@ function App() {
                         <input
                           type="search"
                           value={searchTerm}
-                          onChange={(event) => setSearchTerm(event.target.value)}
+                          onChange={(event) => { setSearchTerm(event.target.value); setCurrentPage(1); }}
                           placeholder="Search plate, driver, date…"
                           className="h-10 w-full rounded-xl border border-zinc-200/90 bg-zinc-50/80 pl-10 pr-3 text-[13px] text-zinc-900 shadow-inner outline-none transition placeholder:text-zinc-400 focus:border-indigo-400/80 focus:bg-white focus:ring-2 focus:ring-indigo-500/20"
                         />
@@ -1757,7 +1786,7 @@ function App() {
                           <button
                             key={option}
                             type="button"
-                            onClick={() => setStatusFilter(option)}
+                            onClick={() => { setStatusFilter(option); setCurrentPage(1); }}
                             className={`whitespace-nowrap rounded-lg px-2.5 py-2 text-2xs font-semibold uppercase tracking-wide transition ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-1 sm:px-3 ${
                               statusFilter === option
                                 ? 'bg-white text-zinc-900 shadow-lift ring-1 ring-zinc-200/80'
@@ -1800,7 +1829,23 @@ function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-100">
-                      {filteredClaims.map((item, index) => {
+                      {claimsLoading
+                        ? Array.from({ length: 8 }).map((_, i) => (
+                            <tr key={i} className="animate-pulse">
+                              <td className="px-3 py-3"><div className="h-3 w-5 rounded bg-zinc-200" /></td>
+                              <td className="px-3 py-3"><div className="h-3 w-28 rounded bg-zinc-200" /><div className="mt-1.5 h-2.5 w-20 rounded bg-zinc-100" /></td>
+                              <td className="px-3 py-3"><div className="h-3 w-20 rounded bg-zinc-200" /></td>
+                              <td className="px-3 py-3"><div className="h-3 w-28 rounded bg-zinc-200" /><div className="mt-1.5 h-2 w-36 rounded bg-zinc-100" /></td>
+                              <td className="px-3 py-3"><div className="h-3 w-32 rounded bg-zinc-200" /></td>
+                              <td className="px-3 py-3"><div className="h-3 w-20 rounded bg-zinc-200" /></td>
+                              <td className="px-3 py-3"><div className="h-3 w-20 rounded bg-zinc-200" /></td>
+                              <td className="px-3 py-3"><div className="h-5 w-16 rounded-full bg-zinc-200" /></td>
+                              <td className="px-3 py-3"><div className="h-5 w-14 rounded-full bg-zinc-200" /></td>
+                              <td className="px-3 py-3"><div className="h-5 w-20 rounded-full bg-zinc-200" /></td>
+                              <td className="px-3 py-3"><div className="h-5 w-8 rounded bg-zinc-200" /></td>
+                            </tr>
+                          ))
+                        : filteredClaims.map((item, index) => {
                         const active = selectedClaim?.id === item.id;
                         const signals = buildClaimSignals(item);
                         return (
@@ -1819,12 +1864,22 @@ function App() {
                               active ? 'bg-indigo-50/80 shadow-[inset_3px_0_0_0_rgb(99,102,241)]' : 'hover:bg-zinc-50/90'
                             }`}
                           >
-                            <td className="px-3 py-2.5 font-mono text-2xs tabular-nums text-zinc-400">{index + 1}</td>
+                            <td className="px-3 py-2.5 font-mono text-2xs tabular-nums text-zinc-400">{(currentPage - 1) * PAGE_SIZE + index + 1}</td>
                             <td className="px-3 py-2.5 font-mono text-2xs text-zinc-500">
                               {item.intakeReference ? (
                                 <div className="min-w-0">
-                                  <div className="font-semibold text-zinc-800" title="Code from the public claim portal">
-                                    {item.intakeReference}
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <span className="font-semibold text-zinc-800" title="Code from the public claim portal">
+                                      {item.intakeReference}
+                                    </span>
+                                    {item.intakeSource === 'admin-buyer-pdf' ? (
+                                      <span
+                                        className="rounded border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-violet-800"
+                                        title="Created from buyer PDF by admin"
+                                      >
+                                        Buyer PDF
+                                      </span>
+                                    ) : null}
                                   </div>
                                   {item.reference ? (
                                     <div className="mt-0.5 truncate text-zinc-400" title="Internal system reference">
@@ -1893,7 +1948,7 @@ function App() {
                           </tr>
                         );
                       })}
-                      {!filteredClaims.length && (
+                      {!claimsLoading && !filteredClaims.length && (
                         <tr>
                           <td colSpan={11} className="px-4 py-12">
                             <div className="mx-auto max-w-md rounded-xl border border-dashed border-zinc-200 bg-zinc-50/80 px-5 py-8 text-center shadow-inner">
@@ -1909,6 +1964,64 @@ function App() {
                   </table>
                 </div>
               </div>
+              {/* Pagination controls */}
+              {totalPages > 1 && (
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3 px-1">
+                  <p className="text-2xs text-zinc-500">
+                    Showing{' '}
+                    <span className="font-semibold text-zinc-800">
+                      {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, totalClaims)}
+                    </span>{' '}
+                    of <span className="font-semibold text-zinc-800">{totalClaims}</span> claims
+                  </p>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      disabled={currentPage <= 1 || claimsLoading}
+                      onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                      className="flex h-8 items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 text-2xs font-semibold text-zinc-700 shadow-sm transition hover:bg-zinc-50 disabled:pointer-events-none disabled:opacity-40"
+                    >
+                      <ChevronLeft className="h-3.5 w-3.5" strokeWidth={2} />
+                      Prev
+                    </button>
+                    {Array.from({ length: totalPages }, (_, i) => i + 1)
+                      .filter((p) => p === 1 || p === totalPages || Math.abs(p - currentPage) <= 2)
+                      .reduce((acc, p, idx, arr) => {
+                        if (idx > 0 && p - arr[idx - 1] > 1) acc.push('...');
+                        acc.push(p);
+                        return acc;
+                      }, [])
+                      .map((p, idx) =>
+                        p === '...' ? (
+                          <span key={`ellipsis-${idx}`} className="px-1 text-2xs text-zinc-400">…</span>
+                        ) : (
+                          <button
+                            key={p}
+                            type="button"
+                            disabled={claimsLoading}
+                            onClick={() => setCurrentPage(p)}
+                            className={`flex h-8 w-8 items-center justify-center rounded-lg border text-2xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
+                              currentPage === p
+                                ? 'border-indigo-500 bg-indigo-600 text-white shadow-sm'
+                                : 'border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 disabled:opacity-40'
+                            }`}
+                          >
+                            {p}
+                          </button>
+                        )
+                      )}
+                    <button
+                      type="button"
+                      disabled={currentPage >= totalPages || claimsLoading}
+                      onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                      className="flex h-8 items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 text-2xs font-semibold text-zinc-700 shadow-sm transition hover:bg-zinc-50 disabled:pointer-events-none disabled:opacity-40"
+                    >
+                      Next
+                      <ChevronRight className="h-3.5 w-3.5" strokeWidth={2} />
+                    </button>
+                  </div>
+                </div>
+              )}
             </section>
               </>
           </main>
@@ -1938,6 +2051,37 @@ function App() {
           onRequestDelete={() => requestDeleteClaim(selectedClaim)}
         />
       )}
+
+      {buyerPdfModalOpen && session?.token && !isModerator ? (
+        <BuyerPdfClaimModal
+          token={session.token}
+          onClose={() => setBuyerPdfModalOpen(false)}
+          onCreated={async (result) => {
+            try {
+              const pageResult = await loadClaims(session.token, { page: 1 });
+              setCurrentPage(1);
+              setClaims(pageResult.claims);
+              setTotalClaims(pageResult.total);
+              setTotalPages(pageResult.totalPages);
+              setStatusTotals(pageResult.statusTotals);
+              setClaimsError('');
+              const created =
+                result?.claim && typeof result.claim === 'object'
+                  ? api.claimFromApi(result.claim)
+                  : pageResult.claims.find((c) => claimMongoId(c) === api.normalizeClaimId(result?.id));
+              if (created) {
+                setSelectedClaim(created);
+              }
+            } catch (err) {
+              if (err instanceof api.ApiAuthError) {
+                logout();
+                return;
+              }
+              setClaimsError(err?.message || 'Claim created but queue refresh failed');
+            }
+          }}
+        />
+      ) : null}
 
       <ClaimDeleteConfirmDialog
         open={Boolean(pendingDeleteClaim)}

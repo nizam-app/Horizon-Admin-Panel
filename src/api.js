@@ -42,13 +42,21 @@ export async function listClaims(token, query = {}) {
   if (query.status && query.status !== 'All') qp.set('status', query.status);
   if (query.q) qp.set('q', String(query.q).trim());
   if (query.paymentStatus) qp.set('paymentStatus', query.paymentStatus);
+  if (query.page && query.page > 1) qp.set('page', String(query.page));
+  if (query.limit) qp.set('limit', String(query.limit));
   const qs = qp.toString();
   const res = await fetch(`${requireApiBase()}/v1/admin/claims${qs ? `?${qs}` : ''}`, {
     headers: { Accept: 'application/json', ...authHdr(token) },
   });
   const data = await parseJson(res);
   await handleResponse(res, data);
-  return data.claims || [];
+  return {
+    claims: (data.claims || []).map(claimFromApi),
+    total: data.total ?? data.claims?.length ?? 0,
+    page: data.page ?? 1,
+    totalPages: data.totalPages ?? 1,
+    statusTotals: data.statusTotals ?? {},
+  };
 }
 
 export async function getClaim(token, id) {
@@ -344,6 +352,39 @@ export async function deleteClaim(token, id) {
   const res = await fetch(`${requireApiBase()}/v1/admin/claims/${encodeURIComponent(claimId)}`, {
     method: 'DELETE',
     headers: { Accept: 'application/json', ...authHdr(token) },
+  });
+  const data = await parseJson(res);
+  await handleResponse(res, data);
+  return data;
+}
+
+/** OCR parse a scanned buyer PDF — returns draft fields + uploadToken (does not create a claim). */
+export async function parseBuyerPdf(token, file) {
+  const fd = new FormData();
+  fd.append('pdf', file, file.name || 'buyer.pdf');
+  const res = await fetch(`${requireApiBase()}/v1/admin/claims/from-buyer-pdf`, {
+    method: 'POST',
+    headers: { ...authHdr(token) },
+    body: fd,
+  });
+  const data = await parseJson(res);
+  await handleResponse(res, data);
+  return data;
+}
+
+/**
+ * Create a claim from reviewed OCR draft + prior uploadToken.
+ * Body: { claim: draft sections, uploadToken }
+ */
+export async function createClaimFromBuyer(token, { claim, uploadToken }) {
+  const res = await fetch(`${requireApiBase()}/v1/admin/claims`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      ...authHdr(token),
+    },
+    body: JSON.stringify({ claim, uploadToken }),
   });
   const data = await parseJson(res);
   await handleResponse(res, data);
