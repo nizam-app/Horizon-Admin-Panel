@@ -20,12 +20,15 @@ import {
   Package,
   Plus,
   Search,
+  Settings,
   Shield,
   Trash2,
   CalendarDays,
   Check,
   Upload,
   UserCircle,
+  Users,
+  Wallet,
   X,
   XCircle,
 } from 'lucide-react';
@@ -33,14 +36,19 @@ import {
 import * as api from './api.js';
 import {
   canManageAttendance,
+  canAccessSettings,
+  canManageHr,
   canManagePartsCrud,
   canViewParts,
   canWriteClaims,
   isKnownStaffRole,
   ROLE_OPTIONS,
-  workspaceRoleLabel,
+  sidebarRoleLabel,
 } from './auth/roles.js';
 import { AttendancePanel } from './AttendancePanel.jsx';
+import { EmployeesPanel } from './EmployeesPanel.jsx';
+import { SalariesPanel } from './SalariesPanel.jsx';
+import { SettingsPanel } from './settings/SettingsPanel.jsx';
 import { PartsManagementPanel } from './parts/PartsManagementPanel.jsx';
 import { PartLineFields } from './parts/PartLineFields.jsx';
 import {
@@ -966,19 +974,12 @@ function App() {
 
   useEffect(() => {
     if (!session) return;
-    if (!canManageAttendance(session.role) && activeWorkspace !== 'claims') {
-      setActiveWorkspace('claims');
-      return;
-    }
-    if (!canViewParts(session.role) && activeWorkspace === 'parts') {
-      setActiveWorkspace('claims');
-      return;
-    }
-    if (
-      activeWorkspace !== 'claims' &&
-      activeWorkspace !== 'attendance' &&
-      activeWorkspace !== 'parts'
-    ) {
+    const allowed = ['claims'];
+    if (canManageAttendance(session.role)) allowed.push('attendance');
+    if (canViewParts(session.role)) allowed.push('parts');
+    if (canManageHr(session.role)) allowed.push('employees', 'salaries');
+    if (canAccessSettings(session.role)) allowed.push('settings');
+    if (!allowed.includes(activeWorkspace)) {
       setActiveWorkspace('claims');
     }
   }, [session, activeWorkspace]);
@@ -1283,6 +1284,17 @@ function App() {
 
   const filteredClaims = claims;
 
+  const handleSettingsProfileSaved = useCallback(
+    ({ displayName }) => {
+      const name = String(displayName ?? '').trim();
+      if (!name || !session) return;
+      const next = { ...session, displayName: name };
+      setSession(next);
+      sessionStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(next));
+    },
+    [session],
+  );
+
   if (!session) {
     return <LoginScreen onLoggedIn={setSession} />;
   }
@@ -1404,16 +1416,21 @@ function App() {
   const claimsReadOnly = !canWriteClaims(session.role);
   const showAttendanceNav = canManageAttendance(session.role);
   const showPartsNav = canViewParts(session.role);
+  const showHrNav = canManageHr(session.role);
+  const showSettingsNav = canAccessSettings(session.role);
   const workspaceTitles = {
     claims: 'Claims queue',
     attendance: 'Attendance',
     parts: 'Parts Management',
+    employees: 'Employees',
+    salaries: 'Salaries',
+    settings: 'Settings',
   };
 
   return (
     <div className="h-screen overflow-hidden bg-mesh-app font-sans text-zinc-900 antialiased">
       <div className="flex h-full min-h-0 flex-col lg:flex-row">
-        <aside className="relative flex w-full shrink-0 flex-col overflow-hidden border-b border-zinc-800/90 bg-zinc-950 text-zinc-100 shadow-[4px_0_24px_-8px_rgba(0,0,0,0.25)] lg:h-full lg:w-[236px] lg:border-b-0 lg:border-r lg:border-zinc-800/90">
+        <aside className="relative flex w-full shrink-0 flex-col overflow-hidden border-b border-zinc-800/90 bg-zinc-950 text-zinc-100 shadow-[4px_0_24px_-8px_rgba(0,0,0,0.25)] lg:h-full lg:w-[260px] lg:border-b-0 lg:border-r lg:border-zinc-800/90">
           <div
             className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_100%_60%_at_0%_0%,rgba(99,102,241,0.12),transparent_50%)] opacity-90"
             aria-hidden
@@ -1424,13 +1441,13 @@ function App() {
             </div>
             <div className="min-w-0 leading-tight">
               <p className="font-display truncate text-[15px] font-semibold tracking-tight text-white">Horizon Smash</p>
-              <p className="truncate text-2xs font-medium uppercase tracking-[0.18em] text-zinc-500">
-                Repairs · {workspaceRoleLabel(session.role)}
+              <p className="truncate text-2xs font-medium uppercase tracking-[0.14em] text-zinc-400">
+                Repairs · {sidebarRoleLabel(session.role)}
               </p>
             </div>
           </div>
 
-          <nav className="relative flex shrink-0 flex-col gap-4 overflow-hidden p-2 lg:py-4">
+          <nav className="relative flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overflow-x-hidden p-2 scrollbar-thin lg:py-4">
             <div>
               <p className="px-2.5 pb-2 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Workspace</p>
               <div className="flex flex-col gap-1">
@@ -1477,29 +1494,85 @@ function App() {
                     <span>Parts Management</span>
                   </button>
                 ) : null}
+                {showHrNav ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setActiveWorkspace('employees')}
+                      className={`flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-[13px] font-medium transition ${
+                        activeWorkspace === 'employees'
+                          ? 'bg-zinc-800/80 text-white shadow-lift ring-1 ring-white/10'
+                          : 'text-zinc-400 hover:bg-zinc-800/40 hover:text-zinc-100'
+                      }`}
+                      aria-current={activeWorkspace === 'employees' ? 'page' : undefined}
+                    >
+                      <Users className="h-4 w-4 shrink-0 text-emerald-300" strokeWidth={2} />
+                      <span>Employees</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveWorkspace('salaries')}
+                      className={`flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-[13px] font-medium transition ${
+                        activeWorkspace === 'salaries'
+                          ? 'bg-zinc-800/80 text-white shadow-lift ring-1 ring-white/10'
+                          : 'text-zinc-400 hover:bg-zinc-800/40 hover:text-zinc-100'
+                      }`}
+                      aria-current={activeWorkspace === 'salaries' ? 'page' : undefined}
+                    >
+                      <Wallet className="h-4 w-4 shrink-0 text-amber-300" strokeWidth={2} />
+                      <span>Salaries</span>
+                    </button>
+                  </>
+                ) : null}
+                {showSettingsNav ? (
+                  <button
+                    type="button"
+                    onClick={() => setActiveWorkspace('settings')}
+                    className={`flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-[13px] font-medium transition ${
+                      activeWorkspace === 'settings'
+                        ? 'bg-zinc-800/80 text-white shadow-lift ring-1 ring-white/10'
+                        : 'text-zinc-400 hover:bg-zinc-800/40 hover:text-zinc-100'
+                    }`}
+                    aria-current={activeWorkspace === 'settings' ? 'page' : undefined}
+                  >
+                    <Settings className="h-4 w-4 shrink-0 text-zinc-300" strokeWidth={2} />
+                    <span>Settings</span>
+                  </button>
+                ) : null}
               </div>
             </div>
           </nav>
 
-          <div className="relative mt-auto shrink-0 border-t border-zinc-800/90 p-3">
-            <div className="flex items-center gap-2.5 rounded-xl border border-zinc-800/80 bg-zinc-900/60 px-2.5 py-2.5 shadow-inner">
-              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-zinc-800 font-mono text-2xs font-semibold text-zinc-300 ring-1 ring-zinc-700/80">
-                {userInitials}
+          <div className="relative z-[1] mt-auto shrink-0 border-t border-zinc-800/90 bg-zinc-950/95 p-3 backdrop-blur-sm">
+            <div className="rounded-xl border border-zinc-700/80 bg-zinc-900/95 px-3 py-3 shadow-inner ring-1 ring-white/5">
+              <div className="flex items-start gap-2.5">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-indigo-500/20 font-mono text-xs font-bold text-indigo-100 ring-1 ring-indigo-400/30">
+                  {userInitials}
+                </div>
+                <div className="min-w-0 flex-1 pt-0.5">
+                  <p className="truncate text-sm font-semibold leading-tight text-white" title={session.displayName}>
+                    {session.displayName}
+                  </p>
+                  <p className="mt-0.5 text-xs font-medium text-zinc-300" title={roleMeta.label}>
+                    {sidebarRoleLabel(session.role)}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={logout}
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-zinc-600/90 bg-zinc-800/80 text-zinc-200 transition hover:border-zinc-500 hover:bg-zinc-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/80"
+                  title="Sign out"
+                  aria-label="Sign out"
+                >
+                  <LogOut className="h-4 w-4" strokeWidth={2} />
+                </button>
               </div>
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-2xs font-semibold text-zinc-100">{session.displayName}</p>
-                <p className="truncate text-2xs text-zinc-500">{roleMeta.label}</p>
-                <p className="truncate font-mono text-[10px] text-zinc-600">{session.email}</p>
-              </div>
-              <button
-                type="button"
-                onClick={logout}
-                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-zinc-700/90 text-zinc-400 transition hover:border-zinc-600 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/80"
-                title="Sign out"
-                aria-label="Sign out"
+              <p
+                className="mt-2.5 break-all text-xs leading-snug text-zinc-400"
+                title={session.email}
               >
-                <LogOut className="h-4 w-4" strokeWidth={2} />
-              </button>
+                {session.email}
+              </p>
             </div>
           </div>
         </aside>
@@ -1537,6 +1610,16 @@ function App() {
                 sessionRole={session.role}
                 onAuthError={logout}
                 onOpenClaim={openClaimById}
+              />
+            ) : activeWorkspace === 'employees' && showHrNav ? (
+              <EmployeesPanel token={session.token} onAuthError={logout} />
+            ) : activeWorkspace === 'salaries' && showHrNav ? (
+              <SalariesPanel token={session.token} onAuthError={logout} />
+            ) : activeWorkspace === 'settings' && showSettingsNav ? (
+              <SettingsPanel
+                token={session.token}
+                onAuthError={logout}
+                onProfileSaved={handleSettingsProfileSaved}
               />
             ) : (
             <>

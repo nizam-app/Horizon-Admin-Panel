@@ -15,7 +15,7 @@ import {
 import * as api from '../api.js';
 import { alertError, alertWarning, confirmDialog } from '../swal.js';
 import { canAddParts, canEditPartLines, canManagePartsCrud } from '../auth/roles.js';
-import { useHrLoadError } from '../hrPanelUtils.js';
+import { labelClass, useHrLoadError } from '../hrPanelUtils.js';
 import { HrFilterBar, HrPageHeader, HrSearchField, hrCardClass, hrPrimaryBtn, hrSecondaryBtn } from '../hr/HrUi.jsx';
 import { PartLineFields, PartStatusBadge } from './PartLineFields.jsx';
 import {
@@ -545,81 +545,98 @@ export function PartsManagementPanel({ token, sessionRole, onAuthError, onOpenCl
 
       <div className={hrCardClass}>
         <HrFilterBar>
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="min-w-0 flex-1 space-y-4">
-          <HrSearchField
-            value={q}
-            onChange={(e) => {
-              setQ(e.target.value);
-              setPage(1);
-            }}
-            placeholder="Search reference, plate, customer, supplier, part…"
-          />
-          <div className="flex flex-wrap items-center gap-2">
-            <select
-              value={statusFilter}
-              onChange={(e) => {
-                setStatusFilter(e.target.value);
-                setPage(1);
-              }}
-              className={`${purchaseInputClass} w-auto min-w-[120px]`}
-            >
-              <option value="">All statuses</option>
-              <option value="pending">Pending</option>
-              <option value="completed">Completed</option>
-            </select>
-            <input
-              type="text"
-              value={supplier}
-              onChange={(e) => {
-                setSupplier(e.target.value);
-                setPage(1);
-              }}
-              placeholder="Supplier"
-              className={`${purchaseInputClass} max-w-[160px]`}
-            />
-            <select
-              value={hasInvoice}
-              onChange={(e) => {
-                setHasInvoice(e.target.value);
-                setPage(1);
-              }}
-              className={`${purchaseInputClass} w-auto min-w-[130px]`}
-            >
-              <option value="">Any invoice</option>
-              <option value="true">Has PDF</option>
-              <option value="false">Missing PDF</option>
-            </select>
-            <span className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">Tentative received</span>
-            <input
-              type="date"
-              value={receivedFrom}
-              onChange={(e) => {
-                setReceivedFrom(e.target.value);
-                setPage(1);
-              }}
-              className={`${purchaseInputClass} w-auto`}
-              aria-label="Received from"
-            />
-            <span className="text-zinc-400">–</span>
-            <input
-              type="date"
-              value={receivedTo}
-              onChange={(e) => {
-                setReceivedTo(e.target.value);
-                setPage(1);
-              }}
-              className={`${purchaseInputClass} w-auto`}
-              aria-label="Received to"
-            />
-          </div>
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-3">
+            <div className="min-w-0 flex-1">
+              <HrSearchField
+                value={q}
+                onChange={(e) => {
+                  setQ(e.target.value);
+                  setPage(1);
+                }}
+                placeholder="Search reference, plate, customer, supplier, part…"
+              />
             </div>
             {canAdd ? (
-              <button type="button" onClick={() => openAddModal()} className={`${hrPrimaryBtn} shrink-0`}>
+              <button
+                type="button"
+                onClick={() => openAddModal()}
+                className={`${hrPrimaryBtn} w-full shrink-0 sm:w-auto`}
+              >
                 <Plus className="h-4 w-4" strokeWidth={2} />
                 Add part
               </button>
             ) : null}
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-12">
+            <div className="sm:col-span-1 lg:col-span-2">
+              <label className={labelClass}>Status</label>
+              <select
+                value={statusFilter}
+                onChange={(e) => {
+                  setStatusFilter(e.target.value);
+                  setPage(1);
+                }}
+                className={`${purchaseInputClass} mt-1.5`}
+              >
+                <option value="">All statuses</option>
+                <option value="pending">Pending</option>
+                <option value="completed">Completed</option>
+              </select>
+            </div>
+            <div className="sm:col-span-1 lg:col-span-3">
+              <label className={labelClass}>Supplier</label>
+              <input
+                type="text"
+                value={supplier}
+                onChange={(e) => {
+                  setSupplier(e.target.value);
+                  setPage(1);
+                }}
+                placeholder="Filter by supplier"
+                className={`${purchaseInputClass} mt-1.5`}
+              />
+            </div>
+            <div className="sm:col-span-1 lg:col-span-2">
+              <label className={labelClass}>Invoice</label>
+              <select
+                value={hasInvoice}
+                onChange={(e) => {
+                  setHasInvoice(e.target.value);
+                  setPage(1);
+                }}
+                className={`${purchaseInputClass} mt-1.5`}
+              >
+                <option value="">Any invoice</option>
+                <option value="true">Has PDF</option>
+                <option value="false">Missing PDF</option>
+              </select>
+            </div>
+            <div className="sm:col-span-2 lg:col-span-5">
+              <label className={labelClass}>Tentative received</label>
+              <div className="mt-1.5 flex min-w-0 items-center gap-2">
+                <input
+                  type="date"
+                  value={receivedFrom}
+                  onChange={(e) => {
+                    setReceivedFrom(e.target.value);
+                    setPage(1);
+                  }}
+                  className={`${purchaseInputClass} min-w-0 flex-1`}
+                  aria-label="Received from"
+                />
+                <span className="shrink-0 text-2xs font-medium text-zinc-400">to</span>
+                <input
+                  type="date"
+                  value={receivedTo}
+                  onChange={(e) => {
+                    setReceivedTo(e.target.value);
+                    setPage(1);
+                  }}
+                  className={`${purchaseInputClass} min-w-0 flex-1`}
+                  aria-label="Received to"
+                />
+              </div>
+            </div>
           </div>
         </HrFilterBar>
 

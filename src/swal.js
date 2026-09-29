@@ -18,6 +18,15 @@ export function alertError(message, title = 'Something went wrong') {
   });
 }
 
+export function alertSuccess(message, title = 'Saved') {
+  return Swal.fire({
+    ...base,
+    icon: 'success',
+    title,
+    text: String(message || ''),
+  });
+}
+
 export function alertWarning(message, title = 'Please check') {
   return Swal.fire({
     ...base,

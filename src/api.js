@@ -47,6 +47,37 @@ export async function loginAdmin(email, password) {
   return handleResponse(res, data);
 }
 
+export async function getStaffMe(token) {
+  const res = await fetch(`${requireApiBase()}/v1/admin/me`, {
+    headers: { Accept: 'application/json', ...authHdr(token) },
+  });
+  const data = await parseJson(res);
+  await handleResponse(res, data);
+  return data.user;
+}
+
+export async function updateStaffMe(token, { displayName }) {
+  const res = await fetch(`${requireApiBase()}/v1/admin/me`, {
+    method: 'PATCH',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHdr(token) },
+    body: JSON.stringify({ displayName }),
+  });
+  const data = await parseJson(res);
+  await handleResponse(res, data);
+  return data.user;
+}
+
+export async function changeStaffPassword(token, { currentPassword, newPassword }) {
+  const res = await fetch(`${requireApiBase()}/v1/admin/me/password`, {
+    method: 'PATCH',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHdr(token) },
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+  const data = await parseJson(res);
+  await handleResponse(res, data);
+  return data;
+}
+
 export async function listClaims(token, query = {}) {
   const qp = new URLSearchParams();
   if (query.status && query.status !== 'All') qp.set('status', query.status);
