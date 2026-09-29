@@ -6,6 +6,16 @@ export function apiBase() {
   return resolvedApiBase();
 }
 
+/** Open PDF / file links from `/uploads/...` on the API origin. */
+export function resolveClaimFileHref(urlOrDataUrl) {
+  const u = String(urlOrDataUrl || '');
+  if (!u || u.startsWith('data:') || u.startsWith('blob:')) return u || '#';
+  if (u.startsWith('http://') || u.startsWith('https://')) return u;
+  const base = apiBase();
+  if (!base) return '#';
+  return `${base}${u.startsWith('/') ? u : `/${u}`}`;
+}
+
 export class ApiAuthError extends Error {
   constructor(message = 'Session expired') {
     super(message);
@@ -60,9 +70,9 @@ export async function listClaims(token, query = {}) {
 }
 
 export async function getClaim(token, id) {
-  const claimId = normalizeClaimId(id);
-  if (!claimId) throw new Error('Invalid claim id');
-  const res = await fetch(`${requireApiBase()}/v1/admin/claims/${encodeURIComponent(claimId)}`, {
+  const claimKey = String(id ?? '').trim();
+  if (!claimKey) throw new Error('Invalid claim id');
+  const res = await fetch(`${requireApiBase()}/v1/admin/claims/${encodeURIComponent(claimKey)}`, {
     headers: { Accept: 'application/json', ...authHdr(token) },
   });
   const data = await parseJson(res);
@@ -234,6 +244,15 @@ export function mapPartsForApi(parts) {
       invoiceFileUrl: first?.fileUrl ?? '',
       status: String(p.status || 'pending').toLowerCase() === 'completed' ? 'completed' : 'pending',
       notes: String(p.notes ?? '').trim(),
+      supplierId: p.supplierId == null || p.supplierId === '' ? null : String(p.supplierId).trim(),
+      supplierPartId:
+        p.supplierPartId == null || p.supplierPartId === '' ? null : String(p.supplierPartId).trim(),
+      listPriceSnapshot:
+        p.listPriceSnapshot === '' || p.listPriceSnapshot == null
+          ? null
+          : typeof p.listPriceSnapshot === 'number' && !Number.isNaN(p.listPriceSnapshot)
+            ? p.listPriceSnapshot
+            : Number(p.listPriceSnapshot) || null,
     };
   });
 }
@@ -282,6 +301,134 @@ export async function persistAdminNote(token, claimId, adminNote) {
 /** Save supplier part lines only. */
 export async function persistParts(token, claimId, parts) {
   return patchClaimWorkspace(token, claimId, { parts: mapPartsForApi(parts) });
+}
+
+// ——— Parts registry (cross-claim) ———
+
+async function handlePartsResponse(res, data) {
+  if (res.status === 403) {
+    throw new Error(typeof data?.error === 'string' ? data.error : 'Parts access required');
+  }
+  return handleResponse(res, data);
+}
+
+export async function listPartsRegistry(token, query = {}) {
+  const qp = new URLSearchParams();
+  if (query.q) qp.set('q', String(query.q).trim());
+  if (query.status) qp.set('status', query.status);
+  if (query.supplier) qp.set('supplier', String(query.supplier).trim());
+  if (query.hasInvoice !== undefined && query.hasInvoice !== '') qp.set('hasInvoice', String(query.hasInvoice));
+  if (query.claimId) qp.set('claimId', String(query.claimId));
+  if (query.page) qp.set('page', String(query.page));
+  if (query.limit) qp.set('limit', String(query.limit));
+  if (query.receivedFrom) qp.set('receivedFrom', String(query.receivedFrom));
+  if (query.receivedTo) qp.set('receivedTo', String(query.receivedTo));
+  const qs = qp.toString();
+  const res = await fetch(`${requireApiBase()}/v1/admin/parts${qs ? `?${qs}` : ''}`, {
+    headers: { Accept: 'application/json', ...authHdr(token) },
+  });
+  const data = await parseJson(res);
+  await handlePartsResponse(res, data);
+  return {
+    parts: data.parts || [],
+    total: data.total ?? 0,
+    page: data.page ?? 1,
+    limit: data.limit ?? 50,
+    totalPages: data.totalPages ?? 1,
+  };
+}
+
+export async function getPartsSummary(token) {
+  const res = await fetch(`${requireApiBase()}/v1/admin/parts/summary`, {
+    headers: { Accept: 'application/json', ...authHdr(token) },
+  });
+  const data = await parseJson(res);
+  await handlePartsResponse(res, data);
+  return data.summary || { total: 0, pending: 0, completed: 0, totalAmount: 0, missingInvoice: 0 };
+}
+
+/** Resolve claim by Mongo id, HRZ reference, or member code (Parts add modal). */
+export async function lookupClaimForParts(token, key) {
+  const qp = new URLSearchParams({ key: String(key ?? '').trim() });
+  const res = await fetch(`${requireApiBase()}/v1/admin/parts/claim-lookup?${qp}`, {
+    headers: { Accept: 'application/json', ...authHdr(token) },
+  });
+  const data = await parseJson(res);
+  await handlePartsResponse(res, data);
+  return data;
+}
+
+export async function getPartLine(token, claimId, partId) {
+  const res = await fetch(
+    `${requireApiBase()}/v1/admin/parts/${encodeURIComponent(claimId)}/${encodeURIComponent(partId)}`,
+    { headers: { Accept: 'application/json', ...authHdr(token) } },
+  );
+  const data = await parseJson(res);
+  await handlePartsResponse(res, data);
+  return { part: data.part, claim: data.claim ? claimFromApi(data.claim) : null };
+}
+
+export async function patchPartLine(token, claimId, partId, body) {
+  const res = await fetch(
+    `${requireApiBase()}/v1/admin/parts/${encodeURIComponent(claimId)}/${encodeURIComponent(partId)}`,
+    {
+      method: 'PATCH',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHdr(token) },
+      body: JSON.stringify(body),
+    },
+  );
+  const data = await parseJson(res);
+  await handlePartsResponse(res, data);
+  return { part: data.part, claim: data.claim ? claimFromApi(data.claim) : null };
+}
+
+export async function createPartLine(token, claimId, body) {
+  const res = await fetch(`${requireApiBase()}/v1/admin/parts/${encodeURIComponent(claimId)}`, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHdr(token) },
+    body: JSON.stringify(body),
+  });
+  const data = await parseJson(res);
+  await handlePartsResponse(res, data);
+  return { part: data.part, claim: data.claim ? claimFromApi(data.claim) : null };
+}
+
+export async function deletePartLine(token, claimId, partId) {
+  const res = await fetch(
+    `${requireApiBase()}/v1/admin/parts/${encodeURIComponent(claimId)}/${encodeURIComponent(partId)}`,
+    { method: 'DELETE', headers: { Accept: 'application/json', ...authHdr(token) } },
+  );
+  const data = await parseJson(res);
+  await handlePartsResponse(res, data);
+  return data.claim ? claimFromApi(data.claim) : null;
+}
+
+export async function listSupplierNameSuggestions(token, query = {}) {
+  const qp = new URLSearchParams();
+  if (query.q) qp.set('q', String(query.q).trim());
+  if (query.limit) qp.set('limit', String(query.limit));
+  const qs = qp.toString();
+  const res = await fetch(
+    `${requireApiBase()}/v1/admin/parts/suggestions/suppliers${qs ? `?${qs}` : ''}`,
+    { headers: { Accept: 'application/json', ...authHdr(token) } },
+  );
+  const data = await parseJson(res);
+  await handlePartsResponse(res, data);
+  return { suppliers: data.suppliers || [] };
+}
+
+export async function listPartSuggestionsForSupplier(token, query = {}) {
+  const qp = new URLSearchParams();
+  if (query.supplier) qp.set('supplier', String(query.supplier).trim());
+  if (query.limit) qp.set('limit', String(query.limit));
+  const qs = qp.toString();
+  const res = await fetch(
+    `${requireApiBase()}/v1/admin/parts/suggestions/parts${qs ? `?${qs}` : ''}`,
+    { headers: { Accept: 'application/json', ...authHdr(token) } },
+  );
+  const data = await parseJson(res);
+  await handlePartsResponse(res, data);
+  return { parts: data.parts || [] };
 }
 
 /** Save repair quote lines and optional primary/final selection. */
@@ -389,4 +536,139 @@ export async function createClaimFromBuyer(token, { claim, uploadToken }) {
   const data = await parseJson(res);
   await handleResponse(res, data);
   return data;
+}
+
+// ——— Attendance (+ employee list for attendance forms) ———
+
+async function handleHrResponse(res, data) {
+  if (res.status === 403) {
+    throw new Error(typeof data?.error === 'string' ? data.error : 'Attendance access required');
+  }
+  return handleResponse(res, data);
+}
+
+export async function listEmployees(token, query = {}) {
+  const qp = new URLSearchParams();
+  if (query.status) qp.set('status', query.status);
+  if (query.q) qp.set('q', String(query.q).trim());
+  const qs = qp.toString();
+  const res = await fetch(`${requireApiBase()}/v1/admin/employees${qs ? `?${qs}` : ''}`, {
+    headers: { Accept: 'application/json', ...authHdr(token) },
+  });
+  const data = await parseJson(res);
+  await handleHrResponse(res, data);
+  return { employees: data.employees || [], total: data.total ?? 0 };
+}
+
+export async function createEmployee(token, body) {
+  const res = await fetch(`${requireApiBase()}/v1/admin/employees`, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHdr(token) },
+    body: JSON.stringify(body),
+  });
+  const data = await parseJson(res);
+  await handleHrResponse(res, data);
+  return data.employee;
+}
+
+export async function updateEmployee(token, id, body) {
+  const res = await fetch(`${requireApiBase()}/v1/admin/employees/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHdr(token) },
+    body: JSON.stringify(body),
+  });
+  const data = await parseJson(res);
+  await handleHrResponse(res, data);
+  return data.employee;
+}
+
+export async function deactivateEmployee(token, id) {
+  const res = await fetch(`${requireApiBase()}/v1/admin/employees/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: { Accept: 'application/json', ...authHdr(token) },
+  });
+  const data = await parseJson(res);
+  await handleHrResponse(res, data);
+  return data.employee;
+}
+
+export async function listSalaries(token, query = {}) {
+  const qp = new URLSearchParams();
+  if (query.employeeId) qp.set('employeeId', query.employeeId);
+  if (query.year) qp.set('year', String(query.year));
+  const qs = qp.toString();
+  const res = await fetch(`${requireApiBase()}/v1/admin/salaries${qs ? `?${qs}` : ''}`, {
+    headers: { Accept: 'application/json', ...authHdr(token) },
+  });
+  const data = await parseJson(res);
+  await handleHrResponse(res, data);
+  return { salaries: data.salaries || [], total: data.total ?? 0 };
+}
+
+export async function createSalary(token, body) {
+  const res = await fetch(`${requireApiBase()}/v1/admin/salaries`, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHdr(token) },
+    body: JSON.stringify(body),
+  });
+  const data = await parseJson(res);
+  await handleHrResponse(res, data);
+  return data.salary;
+}
+
+export async function deleteSalary(token, id) {
+  const res = await fetch(`${requireApiBase()}/v1/admin/salaries/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: { Accept: 'application/json', ...authHdr(token) },
+  });
+  if (res.status === 204) return;
+  const data = await parseJson(res);
+  await handleHrResponse(res, data);
+}
+
+export async function listAttendance(token, query = {}) {
+  const qp = new URLSearchParams();
+  if (query.employeeId) qp.set('employeeId', query.employeeId);
+  if (query.q) qp.set('q', String(query.q).trim());
+  if (query.from) qp.set('from', query.from);
+  if (query.to) qp.set('to', query.to);
+  const qs = qp.toString();
+  const res = await fetch(`${requireApiBase()}/v1/admin/attendance${qs ? `?${qs}` : ''}`, {
+    headers: { Accept: 'application/json', ...authHdr(token) },
+  });
+  const data = await parseJson(res);
+  await handleHrResponse(res, data);
+  return { attendance: data.attendance || [], total: data.total ?? 0 };
+}
+
+export async function createAttendance(token, body) {
+  const res = await fetch(`${requireApiBase()}/v1/admin/attendance`, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHdr(token) },
+    body: JSON.stringify(body),
+  });
+  const data = await parseJson(res);
+  await handleHrResponse(res, data);
+  return data.attendance;
+}
+
+export async function updateAttendance(token, id, body) {
+  const res = await fetch(`${requireApiBase()}/v1/admin/attendance/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHdr(token) },
+    body: JSON.stringify(body),
+  });
+  const data = await parseJson(res);
+  await handleHrResponse(res, data);
+  return data.attendance;
+}
+
+export async function deleteAttendance(token, id) {
+  const res = await fetch(`${requireApiBase()}/v1/admin/attendance/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: { Accept: 'application/json', ...authHdr(token) },
+  });
+  if (res.status === 204) return;
+  const data = await parseJson(res);
+  await handleHrResponse(res, data);
 }

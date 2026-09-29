@@ -7,6 +7,7 @@ import {
   ChevronRight,
   ClipboardCheck,
   Clock3,
+  Copy,
   Download,
   FileCheck2,
   FileSearch,
@@ -14,12 +15,15 @@ import {
   Gavel,
   Inbox,
   Landmark,
+  ListFilter,
   LogOut,
   Package,
   Plus,
   Search,
   Shield,
   Trash2,
+  CalendarDays,
+  Check,
   Upload,
   UserCircle,
   X,
@@ -27,6 +31,35 @@ import {
 } from 'lucide-react';
 
 import * as api from './api.js';
+import {
+  canManageAttendance,
+  canManagePartsCrud,
+  canViewParts,
+  canWriteClaims,
+  isKnownStaffRole,
+  ROLE_OPTIONS,
+  workspaceRoleLabel,
+} from './auth/roles.js';
+import { AttendancePanel } from './AttendancePanel.jsx';
+import { PartsManagementPanel } from './parts/PartsManagementPanel.jsx';
+import { PartLineFields } from './parts/PartLineFields.jsx';
+import {
+  applyPartSuggestion,
+  catalogLinkSnapshot,
+  updatePartInList,
+} from './parts/partsInvoiceHelpers.js';
+import {
+  applySharedContextToPart,
+  cloneParts,
+  extractPartSharedContext,
+  newPartInvoiceId,
+  newPartLine,
+  normalizePartInvoicesFromRow,
+  normalizePartRow,
+  partsEqual,
+  partsSnapshot,
+  purchaseInputClass,
+} from './parts/partUtils.js';
 import { DamageDiagramViewer } from './DamageDiagramViewer.jsx';
 import { AttachmentPreview, SubmissionImage, MemberSubmissionPanel } from './MemberSubmissionPanel.jsx';
 import { buildClaimExportHtml, openClaimExportPrint } from './claimExportHtml.js';
@@ -46,15 +79,7 @@ function normalizePaymentStatus(raw) {
   return 'pending';
 }
 
-/** Open PDF / file links from `/uploads/...` on the API origin. */
-function resolveClaimFileHref(urlOrDataUrl) {
-  const u = String(urlOrDataUrl || '');
-  if (!u || u.startsWith('data:') || u.startsWith('blob:')) return u || '#';
-  if (u.startsWith('http://') || u.startsWith('https://')) return u;
-  const base = api.apiBase();
-  if (!base) return '#';
-  return `${base}${u.startsWith('/') ? u : `/${u}`}`;
-}
+const resolveClaimFileHref = api.resolveClaimFileHref;
 
 const detailFields = [
   { label: 'Owner', getter: (data) => data.memberVehicle?.ownerName },
@@ -89,7 +114,7 @@ const MODAL_TABS = [
   { id: 'submission', label: 'Member submission' },
   { id: 'documents', label: 'Checklist' },
   { id: 'quotes', label: 'Insurance quote' },
-  { id: 'payments', label: 'Purchase' },
+  { id: 'parts', label: 'Parts' },
 ];
 
 function newQuoteLine() {
@@ -121,17 +146,12 @@ function saveUpdateLabel({ hasSaved, busy, entity }) {
 
 const AUTH_STORAGE_KEY = 'horizon_admin_session';
 
-const ROLE_OPTIONS = [
-  { id: 'admin', label: 'Administrator', icon: Shield },
-  { id: 'moderator', label: 'Moderator', icon: UserCircle },
-];
-
 function readStoredSession() {
   try {
     const raw = sessionStorage.getItem(AUTH_STORAGE_KEY);
     if (!raw) return null;
     const data = JSON.parse(raw);
-    if (!data?.email || !data?.token || (data.role !== 'admin' && data.role !== 'moderator')) return null;
+    if (!data?.email || !data?.token || !isKnownStaffRole(data.role)) return null;
     return {
       email: data.email,
       displayName: data.displayName || data.email,
@@ -164,6 +184,49 @@ function claimRef(item) {
   const id = api.normalizeClaimId(item?.id ?? item?._id);
   if (id) return id.length > 12 ? `${id.slice(0, 12)}…` : id;
   return 'Claim';
+}
+
+function CopyTextButton({ text, title }) {
+  const [copied, setCopied] = useState(false);
+  const value = String(text ?? '').trim();
+  const onCopy = useCallback(
+    async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!value) return;
+      try {
+        await navigator.clipboard.writeText(value);
+      } catch {
+        const ta = document.createElement('textarea');
+        ta.value = value;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand('copy');
+        } finally {
+          document.body.removeChild(ta);
+        }
+      }
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    },
+    [value]
+  );
+  if (!value) return null;
+  return (
+    <button
+      type="button"
+      onClick={onCopy}
+      className="inline-flex shrink-0 rounded-md p-0.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-indigo-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40"
+      title={copied ? 'Copied' : title}
+      aria-label={title}
+    >
+      {copied ? <Check className="h-3 w-3 text-emerald-600" strokeWidth={2.5} /> : <Copy className="h-3 w-3" strokeWidth={2} />}
+    </button>
+  );
 }
 
 /** Both refs for print / PDF export (member code + internal). */
@@ -219,68 +282,6 @@ function formatAud(amount) {
   );
 }
 
-function newPartLine() {
-  const id =
-    typeof crypto !== 'undefined' && crypto.randomUUID
-      ? crypto.randomUUID()
-      : `part-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  return {
-    id,
-    company: '',
-    partName: '',
-    amount: '',
-    quotePrice: '',
-    orderDate: '',
-    tentativeReceivedDate: '',
-    receivedBy: '',
-    invoices: [],
-    status: 'pending',
-    notes: '',
-  };
-}
-
-function newPartInvoiceId() {
-  return typeof crypto !== 'undefined' && crypto.randomUUID
-    ? crypto.randomUUID()
-    : `inv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function normalizePartInvoicesFromRow(p) {
-  if (Array.isArray(p?.invoices) && p.invoices.length > 0) {
-    return p.invoices.map((inv) => ({
-      id: String(inv.id || newPartInvoiceId()),
-      invoiceNumber: String(inv.invoiceNumber ?? ''),
-      fileId: inv.fileId ?? null,
-      fileName: String(inv.fileName ?? ''),
-      fileUrl: String(inv.fileUrl ?? ''),
-    }));
-  }
-  if (p?.invoiceFileId || p?.invoiceNumber || p?.invoiceFileName) {
-    return [
-      {
-        id: newPartInvoiceId(),
-        invoiceNumber: String(p.invoiceNumber ?? ''),
-        fileId: p.invoiceFileId ?? null,
-        fileName: String(p.invoiceFileName ?? ''),
-        fileUrl: String(p.invoiceFileUrl ?? ''),
-      },
-    ];
-  }
-  return [];
-}
-
-function normalizePartRow(p) {
-  return {
-    ...p,
-    quotePrice: p?.quotePrice ?? '',
-    invoices: normalizePartInvoicesFromRow(p),
-  };
-}
-
-function cloneParts(parts) {
-  return (parts ?? []).map((p) => normalizePartRow(p));
-}
-
 function cloneQuoteOptions(options) {
   return (options ?? []).map((q) => ({ ...q }));
 }
@@ -293,46 +294,6 @@ function partAmountInputValue(amount) {
 function partAmountNumber(amount) {
   return parseMoneyInput(amount === '' || amount == null ? '' : String(amount)) ?? 0;
 }
-
-function partOptionalMoneyNumber(amount) {
-  return parseMoneyInput(amount === '' || amount == null ? '' : String(amount));
-}
-
-function partsSnapshot(parts) {
-  return cloneParts(parts)
-    .map((p) => ({
-      id: String(p.id || ''),
-      company: String(p.company ?? ''),
-      partName: String(p.partName ?? ''),
-      amount: partAmountNumber(p.amount),
-      quotePrice: partOptionalMoneyNumber(p.quotePrice),
-      orderDate: String(p.orderDate ?? ''),
-      tentativeReceivedDate: String(p.tentativeReceivedDate ?? ''),
-      receivedBy: String(p.receivedBy ?? ''),
-      invoices: normalizePartInvoicesFromRow(p).map((inv) => ({
-        id: String(inv.id),
-        invoiceNumber: String(inv.invoiceNumber ?? ''),
-        fileId: inv.fileId == null ? null : String(inv.fileId),
-        fileName: String(inv.fileName ?? ''),
-        fileUrl: String(inv.fileUrl ?? ''),
-      })),
-      status: String(p.status || 'pending').toLowerCase() === 'completed' ? 'completed' : 'pending',
-      notes: String(p.notes ?? ''),
-    }))
-    .sort((a, b) => a.id.localeCompare(b.id));
-}
-
-function PurchaseField({ label, children, className = '' }) {
-  return (
-    <div className={className}>
-      <span className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">{label}</span>
-      <div className="mt-1">{children}</div>
-    </div>
-  );
-}
-
-const purchaseInputClass =
-  'h-9 w-full rounded-lg border border-zinc-200 bg-white px-2 text-sm text-zinc-900 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-500/20';
 
 function ConfirmDialog({
   open,
@@ -525,195 +486,6 @@ function ClaimDeleteConfirmDialog({
       </div>
     </div>
   );
-}
-
-function PurchaseInvoicesSection({
-  part,
-  isModerator,
-  partNextInvoiceNumber,
-  onNextInvoiceNumberChange,
-  partInvoiceBusyId,
-  onUpload,
-  onInvoiceNumberChange,
-  onRemoveInvoice,
-}) {
-  const invoices = part.invoices ?? [];
-  const busy = partInvoiceBusyId === part.id;
-  const [invoiceToDelete, setInvoiceToDelete] = useState(null);
-  const [deleteBusy, setDeleteBusy] = useState(false);
-
-  const requestRemoveInvoice = (inv) => setInvoiceToDelete(inv);
-
-  const confirmRemoveInvoice = async () => {
-    if (!invoiceToDelete || deleteBusy) return;
-    setDeleteBusy(true);
-    try {
-      await onRemoveInvoice(invoiceToDelete.id);
-      setInvoiceToDelete(null);
-    } finally {
-      setDeleteBusy(false);
-    }
-  };
-
-  if (isModerator) {
-    if (invoices.length === 0) return <p className="text-sm text-zinc-500">No invoices</p>;
-    return (
-      <ul className="divide-y divide-zinc-100 rounded-lg border border-zinc-200/90 bg-white">
-        {invoices.map((inv) => (
-          <li key={inv.id} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5 text-sm">
-            <span className="font-mono font-medium text-zinc-900">{inv.invoiceNumber || '—'}</span>
-            {inv.fileUrl ? (
-              <a
-                href={resolveClaimFileHref(inv.fileUrl)}
-                target="_blank"
-                rel="noreferrer"
-                className="text-2xs font-semibold text-indigo-700 hover:underline"
-              >
-                {inv.fileName || 'View PDF'}
-              </a>
-            ) : (
-              <span className="text-2xs text-zinc-500">{inv.fileName || '—'}</span>
-            )}
-          </li>
-        ))}
-      </ul>
-    );
-  }
-
-  const deleteLabel = invoiceToDelete?.invoiceNumber?.trim() || invoiceToDelete?.fileName || 'this invoice';
-
-  return (
-    <>
-    <ConfirmDialog
-      open={Boolean(invoiceToDelete)}
-      title="Remove invoice?"
-      description={
-        <>
-          This will remove <span className="font-medium text-zinc-900">{deleteLabel}</span> from this purchase
-          line and delete the uploaded PDF from the case. This cannot be undone until you upload it again.
-        </>
-      }
-      confirmLabel="Remove invoice"
-      cancelLabel="Keep invoice"
-      variant="danger"
-      busy={deleteBusy}
-      onCancel={() => {
-        if (!deleteBusy) setInvoiceToDelete(null);
-      }}
-      onConfirm={confirmRemoveInvoice}
-    />
-    <div className="mt-4 overflow-hidden rounded-xl border border-zinc-200/90 bg-white">
-      <div className="border-b border-zinc-100 bg-zinc-50/90 px-4 py-3">
-        <h4 className="text-xs font-semibold text-zinc-900">Invoices</h4>
-        <p className="mt-0.5 text-2xs leading-relaxed text-zinc-600">
-          Add each invoice number with its PDF. You can attach multiple invoices to this purchase line.
-        </p>
-      </div>
-      <div className="space-y-4 p-4">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
-          <div className="w-full sm:max-w-[220px]">
-            <label htmlFor={`next-inv-num-${part.id}`} className="text-2xs font-medium text-zinc-700">
-              Invoice number
-            </label>
-            <input
-              id={`next-inv-num-${part.id}`}
-              type="text"
-              value={partNextInvoiceNumber ?? ''}
-              onChange={(e) => onNextInvoiceNumberChange(e.target.value)}
-              placeholder="e.g. INV-1042"
-              className={`${purchaseInputClass} mt-1`}
-            />
-          </div>
-          <label
-            className={`inline-flex h-9 shrink-0 cursor-pointer items-center justify-center gap-2 rounded-lg px-4 text-xs font-semibold shadow-sm transition ${
-              busy
-                ? 'cursor-wait border border-zinc-200 bg-zinc-100 text-zinc-500'
-                : 'border border-indigo-600 bg-indigo-600 text-white hover:bg-indigo-700'
-            }`}
-          >
-            <Upload className="h-4 w-4" strokeWidth={2} />
-            {busy ? 'Uploading…' : 'Upload PDF'}
-            <input
-              type="file"
-              accept="application/pdf,.pdf"
-              className="sr-only"
-              disabled={busy}
-              onChange={onUpload}
-            />
-          </label>
-        </div>
-
-        {invoices.length === 0 ? (
-          <p className="rounded-lg border border-dashed border-zinc-200 bg-zinc-50/50 px-4 py-6 text-center text-xs text-zinc-500">
-            No invoices yet — enter a number above and upload a PDF.
-          </p>
-        ) : (
-          <div className="overflow-x-auto scrollbar-thin">
-            <table className="w-full min-w-[480px] border-collapse text-left text-[13px]">
-              <thead>
-                <tr className="border-b border-zinc-200 text-2xs font-semibold uppercase tracking-wider text-zinc-500">
-                  <th className="w-[140px] px-3 py-2">Invoice #</th>
-                  <th className="px-3 py-2">Document</th>
-                  <th className="w-[120px] px-3 py-2 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-100">
-                {invoices.map((inv) => (
-                  <tr key={inv.id} className="bg-white hover:bg-zinc-50/50">
-                    <td className="px-3 py-2 align-middle">
-                      <input
-                        type="text"
-                        value={inv.invoiceNumber ?? ''}
-                        onChange={(e) => onInvoiceNumberChange(inv.id, e.target.value)}
-                        placeholder="Invoice #"
-                        aria-label={`Invoice number for ${inv.fileName || 'document'}`}
-                        className="h-9 w-full max-w-[200px] rounded-lg border border-zinc-200 px-2.5 font-mono text-sm outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-500/20"
-                      />
-                    </td>
-                    <td className="px-3 py-2 align-middle">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <FileText className="h-4 w-4 shrink-0 text-rose-600" strokeWidth={2} />
-                        <span className="truncate text-sm text-zinc-700" title={inv.fileName}>
-                          {inv.fileName || 'PDF document'}
-                        </span>
-                      </div>
-                    </td>
-                    <td className="px-3 py-2 align-middle text-right">
-                      <div className="inline-flex items-center justify-end gap-1.5">
-                        {inv.fileUrl ? (
-                          <a
-                            href={resolveClaimFileHref(inv.fileUrl)}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex h-8 items-center rounded-lg border border-zinc-200 bg-white px-2.5 text-2xs font-semibold text-zinc-800 hover:bg-zinc-50"
-                          >
-                            Open
-                          </a>
-                        ) : null}
-                        <button
-                          type="button"
-                          onClick={() => requestRemoveInvoice(inv)}
-                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-rose-200/90 text-rose-700 hover:bg-rose-50"
-                          aria-label="Remove invoice"
-                        >
-                          <Trash2 className="h-4 w-4" strokeWidth={2} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-    </div>
-    </>
-  );
-}
-
-function partsEqual(a, b) {
-  return JSON.stringify(partsSnapshot(a)) === JSON.stringify(partsSnapshot(b));
 }
 
 function quoteOptionsSnapshot(options) {
@@ -1086,8 +858,7 @@ function LoginScreen({ onLoggedIn }) {
             </div>
           </div>
           <p className="mt-8 text-sm leading-relaxed text-zinc-400">
-            Sign in to the operations console. Your account role determines whether you can change claim disposition or
-            review records read-only.
+            Sign in to the operations console. Administrator and super administrator roles have full workspace access.
           </p>
           <form className="mt-8 space-y-5" onSubmit={handleSubmit} noValidate>
             <div>
@@ -1140,8 +911,8 @@ function LoginScreen({ onLoggedIn }) {
                 <span className="text-zinc-400">npm run seed:staff</span> once, then{' '}
                 <span className="text-zinc-400">admin@horizon.smash</span> · <span className="text-zinc-400">admin123</span>
                 <br />
-                Moderator: <span className="text-zinc-400">moderator@horizon.smash</span> ·{' '}
-                <span className="text-zinc-400">mod123</span>
+                Super admin: <span className="text-zinc-400">superadmin@horizon.smash</span> ·{' '}
+                <span className="text-zinc-400">super123</span>
               </p>
             ) : (
               <p className="mt-2 text-2xs leading-relaxed text-amber-200/90">
@@ -1163,6 +934,7 @@ function App() {
   const [claimsError, setClaimsError] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedClaim, setSelectedClaim] = useState(null);
+  const [claimModalInitialTab, setClaimModalInitialTab] = useState('overview');
   const [pendingDeleteClaim, setPendingDeleteClaim] = useState(null);
   const [claimDeleteBusy, setClaimDeleteBusy] = useState(false);
   const [claimDeleteError, setClaimDeleteError] = useState('');
@@ -1173,6 +945,7 @@ function App() {
   const [totalPages, setTotalPages] = useState(1);
   const [totalClaims, setTotalClaims] = useState(0);
   const [statusTotals, setStatusTotals] = useState({});
+  const [activeWorkspace, setActiveWorkspace] = useState('claims');
   const PAGE_SIZE = 20;
 
   const persistTimersRef = useRef({});
@@ -1188,7 +961,27 @@ function App() {
     setSelectedClaim(null);
     setClaims([]);
     setClaimsError('');
+    setActiveWorkspace('claims');
   }, []);
+
+  useEffect(() => {
+    if (!session) return;
+    if (!canManageAttendance(session.role) && activeWorkspace !== 'claims') {
+      setActiveWorkspace('claims');
+      return;
+    }
+    if (!canViewParts(session.role) && activeWorkspace === 'parts') {
+      setActiveWorkspace('claims');
+      return;
+    }
+    if (
+      activeWorkspace !== 'claims' &&
+      activeWorkspace !== 'attendance' &&
+      activeWorkspace !== 'parts'
+    ) {
+      setActiveWorkspace('claims');
+    }
+  }, [session, activeWorkspace]);
 
   const loadClaims = useCallback(
     async (token, { status = statusFilter, q = searchTerm, page = currentPage } = {}) => {
@@ -1214,7 +1007,7 @@ function App() {
 
   const runWorkspacePersist = useCallback(
     async (id, body, seq) => {
-      if (!session?.token || session.role !== 'admin' || !body) return;
+      if (!session?.token || !canWriteClaims(session.role) || !body) return;
       const claimId = api.normalizeClaimId(id);
       if (!claimId) throw new Error('Invalid claim id');
       const updated = await api.patchClaimWorkspace(session.token, claimId, body);
@@ -1228,7 +1021,7 @@ function App() {
 
   const scheduleWorkspacePersist = useCallback(
     (id, mergedClaim) => {
-      if (!session?.token || session.role !== 'admin') return;
+      if (!session?.token || !canWriteClaims(session.role)) return;
       const claimId = api.normalizeClaimId(id) || claimMongoId(mergedClaim);
       if (!claimId) {
         setWorkspaceSave('error');
@@ -1256,7 +1049,7 @@ function App() {
   const flushWorkspacePersist = useCallback(
     async (claim) => {
       const claimId = claimMongoId(claim);
-      if (!claimId || !session?.token || session.role !== 'admin') return;
+      if (!claimId || !session?.token || !canWriteClaims(session.role)) return;
       window.clearTimeout(persistTimersRef.current[claimId]);
       const body = persistWorkspaceBodiesRef.current[claimId] || api.buildAdminPersistBody(claim);
       setWorkspaceSave('saving');
@@ -1277,7 +1070,7 @@ function App() {
 
   const saveClaimPrices = useCallback(
     async (fields) => {
-      if (!session?.token || session.role !== 'admin' || !selectedClaim) {
+      if (!session?.token || !canWriteClaims(session.role) || !selectedClaim) {
         throw new Error('Not authorized');
       }
       const claimId = claimMongoId(selectedClaim);
@@ -1308,7 +1101,7 @@ function App() {
 
   const saveAdminNote = useCallback(
     async (note) => {
-      if (!session?.token || session.role !== 'admin' || !selectedClaim) {
+      if (!session?.token || !canWriteClaims(session.role) || !selectedClaim) {
         throw new Error('Not authorized');
       }
       const claimId = claimMongoId(selectedClaim);
@@ -1322,7 +1115,7 @@ function App() {
 
   const saveParts = useCallback(
     async (parts) => {
-      if (!session?.token || session.role !== 'admin' || !selectedClaim) {
+      if (!session?.token || !canWriteClaims(session.role) || !selectedClaim) {
         throw new Error('Not authorized');
       }
       const claimId = claimMongoId(selectedClaim);
@@ -1336,7 +1129,7 @@ function App() {
 
   const saveQuoteWorkspace = useCallback(
     async (payload) => {
-      if (!session?.token || session.role !== 'admin' || !selectedClaim) {
+      if (!session?.token || !canWriteClaims(session.role) || !selectedClaim) {
         throw new Error('Not authorized');
       }
       const claimId = claimMongoId(selectedClaim);
@@ -1350,7 +1143,7 @@ function App() {
 
   const savePaymentStatus = useCallback(
     async (paymentStatus) => {
-      if (!session?.token || session.role !== 'admin' || !selectedClaim) {
+      if (!session?.token || !canWriteClaims(session.role) || !selectedClaim) {
         throw new Error('Not authorized');
       }
       const claimId = claimMongoId(selectedClaim);
@@ -1364,7 +1157,7 @@ function App() {
 
   const saveMemberSubmission = useCallback(
     async (section, data) => {
-      if (!session?.token || session.role !== 'admin' || !selectedClaim) {
+      if (!session?.token || !canWriteClaims(session.role) || !selectedClaim) {
         throw new Error('Not authorized');
       }
       const claimId = claimMongoId(selectedClaim);
@@ -1378,7 +1171,7 @@ function App() {
 
   const deleteClaimRecord = useCallback(
     async (claimId) => {
-      if (!session?.token || session.role !== 'admin') {
+      if (!session?.token || !canWriteClaims(session.role)) {
         throw new Error('Only administrators can delete claims');
       }
       const id = api.normalizeClaimId(claimId);
@@ -1505,7 +1298,7 @@ function App() {
     const previousSelected = selectedClaim;
     setClaims((current) => current.map((item) => (sameClaim(item) ? { ...item, status } : item)));
     setSelectedClaim((current) => (current && sameClaim(current) ? { ...current, status } : current));
-    if (!session.token || session.role !== 'admin') return;
+    if (!session.token || !canWriteClaims(session.role)) return;
     try {
       const updated = await api.patchClaimStatus(session.token, claimId, status);
       applyClaimFromServer(updated);
@@ -1569,8 +1362,25 @@ function App() {
     );
   };
 
+  const openClaimById = async (claimId, tab = 'parts') => {
+    if (!session?.token) return;
+    const rowId = api.normalizeClaimId(claimId);
+    if (!rowId) return;
+    setClaimModalInitialTab(tab);
+    setActiveWorkspace('claims');
+    setSelectedClaim({ id: rowId, _detailLoading: true });
+    try {
+      const full = await api.getClaim(session.token, rowId);
+      setSelectedClaim(api.claimFromApi(full));
+    } catch (e) {
+      if (e instanceof api.ApiAuthError) logout();
+      else window.alert(e?.message || 'Could not open claim');
+    }
+  };
+
   const openRow = async (item) => {
     if (!session?.token) return;
+    setClaimModalInitialTab('overview');
     const rowId = api.normalizeClaimId(item?.id ?? item?._id);
     if (!rowId) {
       window.alert('This claim has an invalid id in the list. Refresh the page or contact support.');
@@ -1591,12 +1401,19 @@ function App() {
   const t = metrics.total;
   const roleMeta = ROLE_OPTIONS.find((r) => r.id === session.role) ?? ROLE_OPTIONS[0];
   const userInitials = initialsFromName(session.displayName);
-  const isModerator = session.role === 'moderator';
+  const claimsReadOnly = !canWriteClaims(session.role);
+  const showAttendanceNav = canManageAttendance(session.role);
+  const showPartsNav = canViewParts(session.role);
+  const workspaceTitles = {
+    claims: 'Claims queue',
+    attendance: 'Attendance',
+    parts: 'Parts Management',
+  };
 
   return (
-    <div className="min-h-screen bg-mesh-app font-sans text-zinc-900 antialiased">
-      <div className="flex min-h-screen flex-col lg:flex-row">
-        <aside className="relative flex w-full flex-col border-b border-zinc-800/90 bg-zinc-950 text-zinc-100 shadow-[4px_0_24px_-8px_rgba(0,0,0,0.25)] lg:w-[236px] lg:shrink-0 lg:border-b-0 lg:border-r lg:border-zinc-800/90">
+    <div className="h-screen overflow-hidden bg-mesh-app font-sans text-zinc-900 antialiased">
+      <div className="flex h-full min-h-0 flex-col lg:flex-row">
+        <aside className="relative flex w-full shrink-0 flex-col overflow-hidden border-b border-zinc-800/90 bg-zinc-950 text-zinc-100 shadow-[4px_0_24px_-8px_rgba(0,0,0,0.25)] lg:h-full lg:w-[236px] lg:border-b-0 lg:border-r lg:border-zinc-800/90">
           <div
             className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_100%_60%_at_0%_0%,rgba(99,102,241,0.12),transparent_50%)] opacity-90"
             aria-hidden
@@ -1608,25 +1425,63 @@ function App() {
             <div className="min-w-0 leading-tight">
               <p className="font-display truncate text-[15px] font-semibold tracking-tight text-white">Horizon Smash</p>
               <p className="truncate text-2xs font-medium uppercase tracking-[0.18em] text-zinc-500">
-                Repairs · {isModerator ? 'Moderator' : 'Administrator'}
+                Repairs · {workspaceRoleLabel(session.role)}
               </p>
             </div>
           </div>
 
-          <nav className="relative flex flex-1 flex-col gap-4 overflow-y-auto scrollbar-thin p-2 lg:py-4">
+          <nav className="relative flex shrink-0 flex-col gap-4 overflow-hidden p-2 lg:py-4">
             <div>
               <p className="px-2.5 pb-2 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Workspace</p>
-              <div
-                className="flex items-center gap-2.5 rounded-xl bg-zinc-800/80 px-3 py-2.5 text-[13px] font-medium text-white shadow-lift ring-1 ring-white/10"
-                aria-current="page"
-              >
-                <Inbox className="h-4 w-4 shrink-0 text-indigo-300" strokeWidth={2} />
-                <span>Claims queue</span>
+              <div className="flex flex-col gap-1">
+                <button
+                  type="button"
+                  onClick={() => setActiveWorkspace('claims')}
+                  className={`flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-[13px] font-medium transition ${
+                    activeWorkspace === 'claims'
+                      ? 'bg-zinc-800/80 text-white shadow-lift ring-1 ring-white/10'
+                      : 'text-zinc-400 hover:bg-zinc-800/40 hover:text-zinc-100'
+                  }`}
+                  aria-current={activeWorkspace === 'claims' ? 'page' : undefined}
+                >
+                  <Inbox className="h-4 w-4 shrink-0 text-indigo-300" strokeWidth={2} />
+                  <span>Claims queue</span>
+                </button>
+                {showAttendanceNav ? (
+                  <button
+                    type="button"
+                    onClick={() => setActiveWorkspace('attendance')}
+                    className={`flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-[13px] font-medium transition ${
+                      activeWorkspace === 'attendance'
+                        ? 'bg-zinc-800/80 text-white shadow-lift ring-1 ring-white/10'
+                        : 'text-zinc-400 hover:bg-zinc-800/40 hover:text-zinc-100'
+                    }`}
+                    aria-current={activeWorkspace === 'attendance' ? 'page' : undefined}
+                  >
+                    <CalendarDays className="h-4 w-4 shrink-0 text-sky-300" strokeWidth={2} />
+                    <span>Attendance</span>
+                  </button>
+                ) : null}
+                {showPartsNav ? (
+                  <button
+                    type="button"
+                    onClick={() => setActiveWorkspace('parts')}
+                    className={`flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-[13px] font-medium transition ${
+                      activeWorkspace === 'parts'
+                        ? 'bg-zinc-800/80 text-white shadow-lift ring-1 ring-white/10'
+                        : 'text-zinc-400 hover:bg-zinc-800/40 hover:text-zinc-100'
+                    }`}
+                    aria-current={activeWorkspace === 'parts' ? 'page' : undefined}
+                  >
+                    <Package className="h-4 w-4 shrink-0 text-violet-300" strokeWidth={2} />
+                    <span>Parts Management</span>
+                  </button>
+                ) : null}
               </div>
             </div>
           </nav>
 
-          <div className="relative border-t border-zinc-800/90 p-3">
+          <div className="relative mt-auto shrink-0 border-t border-zinc-800/90 p-3">
             <div className="flex items-center gap-2.5 rounded-xl border border-zinc-800/80 bg-zinc-900/60 px-2.5 py-2.5 shadow-inner">
               <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-zinc-800 font-mono text-2xs font-semibold text-zinc-300 ring-1 ring-zinc-700/80">
                 {userInitials}
@@ -1649,13 +1504,13 @@ function App() {
           </div>
         </aside>
 
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <header className="sticky top-0 z-10 border-b border-zinc-200/80 bg-white/80 shadow-sm backdrop-blur-xl supports-[backdrop-filter]:bg-white/65">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          <header className="z-10 shrink-0 border-b border-zinc-200/80 bg-white/80 shadow-sm backdrop-blur-xl supports-[backdrop-filter]:bg-white/65">
             <div className="flex h-11 items-center justify-between gap-4 px-3 sm:px-5 lg:px-8">
               <div className="flex min-w-0 flex-wrap items-center gap-2 text-2xs text-zinc-500 sm:gap-3">
                 <span className="hidden font-semibold uppercase tracking-wider text-zinc-400 sm:inline">Operations</span>
                 <ChevronRight className="hidden h-3 w-3 shrink-0 text-zinc-300 sm:inline" aria-hidden />
-                <span className="truncate font-medium text-zinc-800">Claims queue</span>
+                <span className="truncate font-medium text-zinc-800">{workspaceTitles[activeWorkspace] ?? 'Claims queue'}</span>
                 <span className="hidden h-3 w-px shrink-0 bg-zinc-200 sm:inline" aria-hidden />
                 <span className="hidden truncate text-zinc-500 md:inline">Review</span>
                 <span className="rounded-lg border border-zinc-200/90 bg-zinc-50 px-2 py-0.5 font-medium text-zinc-800 shadow-sm">
@@ -1674,11 +1529,21 @@ function App() {
           </header>
 
           <main className="flex-1 overflow-auto scrollbar-thin px-3 py-3 sm:px-5 lg:px-8 lg:py-4">
+            {activeWorkspace === 'attendance' && showAttendanceNav ? (
+              <AttendancePanel token={session.token} onAuthError={logout} />
+            ) : activeWorkspace === 'parts' && showPartsNav ? (
+              <PartsManagementPanel
+                token={session.token}
+                sessionRole={session.role}
+                onAuthError={logout}
+                onOpenClaim={openClaimById}
+              />
+            ) : (
             <>
             {claimsError ? (
               <div className="mb-5 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">{claimsError}</div>
             ) : null}
-            {isModerator && (
+            {claimsReadOnly && (
               <div className="mb-5 flex items-start gap-3 rounded-xl border border-indigo-200/80 bg-gradient-to-r from-indigo-50/90 to-white px-4 py-3 shadow-card sm:items-center sm:px-5">
                 <span className="mt-0.5 shrink-0 rounded-lg border border-indigo-300/80 bg-white px-2 py-0.5 text-2xs font-bold uppercase tracking-wide text-indigo-900 shadow-sm sm:mt-0">
                   Read-only
@@ -1688,48 +1553,95 @@ function App() {
                 </p>
               </div>
             )}
-            <section className="hidden">
+            <section
+              className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7"
+              aria-label="Claims portfolio statistics"
+            >
               <MetricCard
-                title="Total claims"
+                title="Total"
                 value={metrics.total}
-                caption="All records in the active portfolio."
+                caption="Full portfolio"
                 icon={FileCheck2}
                 tone="slate"
+                active={statusFilter === 'All' && !searchTerm.trim()}
+                onClick={() => {
+                  setStatusFilter('All');
+                  setCurrentPage(1);
+                }}
               />
               <MetricCard
-                title="Pending review"
+                title="Pending"
                 value={metrics.pending}
-                caption={t ? `${shareOfTotal(metrics.pending, t)}% of portfolio` : '—'}
+                caption={t ? `${shareOfTotal(metrics.pending, t)}% of total` : '—'}
                 icon={FileSearch}
                 tone="amber"
+                active={statusFilter === 'Pending Review'}
+                onClick={() => {
+                  setStatusFilter('Pending Review');
+                  setCurrentPage(1);
+                }}
               />
               <MetricCard
                 title="Approved"
                 value={metrics.approved}
-                caption={t ? `${shareOfTotal(metrics.approved, t)}% of portfolio` : '—'}
+                caption={t ? `${shareOfTotal(metrics.approved, t)}% of total` : '—'}
                 icon={CheckCircle2}
                 tone="emerald"
+                active={statusFilter === 'Approved'}
+                onClick={() => {
+                  setStatusFilter('Approved');
+                  setCurrentPage(1);
+                }}
               />
               <MetricCard
                 title="Rejected"
                 value={metrics.rejected}
-                caption={t ? `${shareOfTotal(metrics.rejected, t)}% of portfolio` : '—'}
+                caption={t ? `${shareOfTotal(metrics.rejected, t)}% of total` : '—'}
                 icon={XCircle}
                 tone="rose"
+                active={statusFilter === 'Rejected'}
+                onClick={() => {
+                  setStatusFilter('Rejected');
+                  setCurrentPage(1);
+                }}
               />
               <MetricCard
                 title="Litigation"
                 value={metrics.litigation}
-                caption={t ? `${shareOfTotal(metrics.litigation, t)}% of portfolio` : '—'}
+                caption={t ? `${shareOfTotal(metrics.litigation, t)}% of total` : '—'}
                 icon={Gavel}
                 tone="violet"
+                active={statusFilter === 'Litigation'}
+                onClick={() => {
+                  setStatusFilter('Litigation');
+                  setCurrentPage(1);
+                }}
               />
               <MetricCard
                 title="Recovery"
                 value={metrics.recovery}
-                caption={t ? `${shareOfTotal(metrics.recovery, t)}% of portfolio` : '—'}
+                caption={t ? `${shareOfTotal(metrics.recovery, t)}% of total` : '—'}
                 icon={Landmark}
                 tone="sky"
+                active={statusFilter === 'Recovery'}
+                onClick={() => {
+                  setStatusFilter('Recovery');
+                  setCurrentPage(1);
+                }}
+              />
+              <MetricCard
+                title="Filtered"
+                value={totalClaims}
+                caption={
+                  statusFilter === 'All' && !searchTerm.trim()
+                    ? 'Matches current view'
+                    : [statusFilter !== 'All' ? statusFilterLabel(statusFilter) : null, searchTerm.trim() ? 'Search' : null]
+                        .filter(Boolean)
+                        .join(' · ') || 'Matches current view'
+                }
+                icon={ListFilter}
+                tone="indigo"
+                className="col-span-2 sm:col-span-1"
               />
             </section>
 
@@ -1737,23 +1649,12 @@ function App() {
               <div className="flex min-w-0 flex-col overflow-hidden rounded-2xl border border-zinc-200/90 bg-white shadow-card">
                 <div className="border-b border-zinc-100 px-3 py-3 sm:px-5">
                   <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-                    <div className="flex min-w-0 flex-col gap-2">
-                      <div className="flex min-w-0 flex-wrap items-center gap-2">
-                        <h1 className="font-display text-base font-semibold tracking-tight text-zinc-950">Claims queue</h1>
-                        <span className="hidden h-4 w-px bg-zinc-200 sm:inline-block" aria-hidden />
-                        <QueueMetricChip label="Total" value={metrics.total} />
-                        <QueueMetricChip label="Pending" value={metrics.pending} tone="warn" />
-                        <QueueMetricChip label="Approved" value={metrics.approved} tone="good" />
-                        <QueueMetricChip label="Filtered" value={totalClaims} />
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        {metrics.rejected ? <QueueMetricChip label="Rejected" value={metrics.rejected} tone="danger" /> : null}
-                        {metrics.litigation ? <QueueMetricChip label="Litigation" value={metrics.litigation} tone="warn" /> : null}
-                        {metrics.recovery ? <QueueMetricChip label="Recovery" value={metrics.recovery} /> : null}
-                      </div>
+                    <div className="min-w-0">
+                      <h1 className="font-display text-base font-semibold tracking-tight text-zinc-950">Claims queue</h1>
+                      <p className="mt-0.5 text-2xs text-zinc-500">Search, filter, and open claims from the table below.</p>
                     </div>
                     <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center xl:w-auto xl:max-w-3xl">
-                      {!isModerator ? (
+                      {!claimsReadOnly ? (
                         <button
                           type="button"
                           onClick={() => setBuyerPdfModalOpen(true)}
@@ -1773,7 +1674,7 @@ function App() {
                           type="search"
                           value={searchTerm}
                           onChange={(event) => { setSearchTerm(event.target.value); setCurrentPage(1); }}
-                          placeholder="Search plate, driver, date…"
+                          placeholder="Search plate, customer, driver, date…"
                           className="h-10 w-full rounded-xl border border-zinc-200/90 bg-zinc-50/80 pl-10 pr-3 text-[13px] text-zinc-900 shadow-inner outline-none transition placeholder:text-zinc-400 focus:border-indigo-400/80 focus:bg-white focus:ring-2 focus:ring-indigo-500/20"
                         />
                       </label>
@@ -1824,7 +1725,7 @@ function App() {
                         <th className="px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Priority</th>
                         <th className="px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">Status</th>
                         <th className="w-[72px] px-3 py-2.5 text-2xs font-semibold uppercase tracking-wider text-zinc-500">
-                          {isModerator ? '' : 'Actions'}
+                          {claimsReadOnly ? '' : 'Actions'}
                         </th>
                       </tr>
                     </thead>
@@ -1868,10 +1769,11 @@ function App() {
                             <td className="px-3 py-2.5 font-mono text-2xs text-zinc-500">
                               {item.intakeReference ? (
                                 <div className="min-w-0">
-                                  <div className="flex flex-wrap items-center gap-1.5">
+                                  <div className="flex flex-wrap items-center gap-1">
                                     <span className="font-semibold text-zinc-800" title="Code from the public claim portal">
                                       {item.intakeReference}
                                     </span>
+                                    <CopyTextButton text={item.intakeReference} title="Copy member reference" />
                                     {item.intakeSource === 'admin-buyer-pdf' ? (
                                       <span
                                         className="rounded border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-violet-800"
@@ -1882,13 +1784,22 @@ function App() {
                                     ) : null}
                                   </div>
                                   {item.reference ? (
-                                    <div className="mt-0.5 truncate text-zinc-400" title="Internal system reference">
-                                      {item.reference}
+                                    <div className="mt-0.5 flex min-w-0 items-center gap-1">
+                                      <span className="min-w-0 truncate text-zinc-400" title="Internal system reference (claim ID)">
+                                        {item.reference}
+                                      </span>
+                                      <CopyTextButton text={item.reference} title="Copy claim ID" />
                                     </div>
                                   ) : null}
                                 </div>
                               ) : (
-                                <span className="text-zinc-600">{claimRef(item)}</span>
+                                <div className="flex min-w-0 items-center gap-1">
+                                  <span className="truncate text-zinc-600">{claimRef(item)}</span>
+                                  <CopyTextButton
+                                    text={item.reference || claimMongoId(item)}
+                                    title="Copy claim ID"
+                                  />
+                                </div>
                               )}
                             </td>
                             <td className="px-3 py-2.5">
@@ -1931,7 +1842,7 @@ function App() {
                             </td>
                             <td className="px-3 py-2.5" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
                               <div className="flex items-center justify-end gap-1">
-                                {!isModerator ? (
+                                {!claimsReadOnly ? (
                                   <button
                                     type="button"
                                     onClick={() => requestDeleteClaim(item)}
@@ -2024,6 +1935,7 @@ function App() {
               )}
             </section>
               </>
+            )}
           </main>
         </div>
       </div>
@@ -2031,6 +1943,7 @@ function App() {
       {selectedClaim && (
         <ClaimModal
           claimItem={selectedClaim}
+          initialTab={claimModalInitialTab}
           role={session.role}
           authToken={session.token}
           workspaceSave={workspaceSave}
@@ -2052,7 +1965,7 @@ function App() {
         />
       )}
 
-      {buyerPdfModalOpen && session?.token && !isModerator ? (
+      {buyerPdfModalOpen && session?.token && !claimsReadOnly ? (
         <BuyerPdfClaimModal
           token={session.token}
           onClose={() => setBuyerPdfModalOpen(false)}
@@ -2100,24 +2013,66 @@ function App() {
   );
 }
 
-function MetricCard() {
-  return null;
-}
+const METRIC_TONE = {
+  slate: {
+    card: 'from-zinc-50/80',
+    iconWrap: 'bg-zinc-100 text-zinc-600 ring-zinc-200/80',
+  },
+  amber: {
+    card: 'from-amber-50/70',
+    iconWrap: 'bg-amber-100 text-amber-700 ring-amber-200/80',
+  },
+  emerald: {
+    card: 'from-emerald-50/70',
+    iconWrap: 'bg-emerald-100 text-emerald-700 ring-emerald-200/80',
+  },
+  rose: {
+    card: 'from-rose-50/70',
+    iconWrap: 'bg-rose-100 text-rose-700 ring-rose-200/80',
+  },
+  violet: {
+    card: 'from-violet-50/70',
+    iconWrap: 'bg-violet-100 text-violet-700 ring-violet-200/80',
+  },
+  sky: {
+    card: 'from-sky-50/70',
+    iconWrap: 'bg-sky-100 text-sky-700 ring-sky-200/80',
+  },
+  indigo: {
+    card: 'from-indigo-50/70',
+    iconWrap: 'bg-indigo-100 text-indigo-700 ring-indigo-200/80',
+  },
+};
 
-function QueueMetricChip({ label, value, tone = 'default' }) {
-  const toneClass =
-    tone === 'warn'
-      ? 'border-amber-200 bg-amber-50 text-amber-950'
-      : tone === 'good'
-        ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
-        : tone === 'danger'
-          ? 'border-rose-200 bg-rose-50 text-rose-900'
-          : 'border-zinc-200 bg-white text-zinc-800';
+function MetricCard({ title, value, caption, icon: Icon, tone = 'slate', onClick, active, className = '' }) {
+  const palette = METRIC_TONE[tone] ?? METRIC_TONE.slate;
+  const interactive = Boolean(onClick);
+  const Wrapper = interactive ? 'button' : 'div';
   return (
-    <span className={`inline-flex h-8 items-center gap-2 rounded-lg border px-2.5 text-2xs font-semibold ${toneClass}`}>
-      <span className="text-zinc-500">{label}</span>
-      <span className="font-mono text-sm tabular-nums text-zinc-950">{value}</span>
-    </span>
+    <Wrapper
+      type={interactive ? 'button' : undefined}
+      onClick={onClick}
+      className={`group relative overflow-hidden rounded-2xl border bg-gradient-to-br to-white p-3.5 text-left shadow-card transition sm:p-4 ${
+        active
+          ? 'border-indigo-300/90 ring-2 ring-indigo-500/15'
+          : 'border-zinc-200/90 hover:border-zinc-300/90 hover:shadow-lift'
+      } ${palette.card} ${interactive ? 'cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40' : ''} ${className}`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">{title}</p>
+          <p className="mt-1 font-display text-2xl font-semibold tabular-nums leading-none tracking-tight text-zinc-950 sm:text-[1.65rem]">
+            {value}
+          </p>
+          {caption ? <p className="mt-1.5 line-clamp-2 text-[11px] leading-snug text-zinc-500">{caption}</p> : null}
+        </div>
+        <div
+          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ring-1 ring-inset transition group-hover:scale-105 sm:h-10 sm:w-10 ${palette.iconWrap}`}
+        >
+          <Icon className="h-4 w-4 sm:h-[1.125rem] sm:w-[1.125rem]" strokeWidth={2} />
+        </div>
+      </div>
+    </Wrapper>
   );
 }
 
@@ -2477,6 +2432,7 @@ function priceDraftFromClaim(item) {
 
 function ClaimModal({
   claimItem,
+  initialTab = 'overview',
   role,
   authToken,
   workspaceSave,
@@ -2523,7 +2479,9 @@ function ClaimModal({
   const [paymentSave, setPaymentSave] = useState('idle');
   const [paymentSaveKind, setPaymentSaveKind] = useState(null);
   const [pdfPreviewOpen, setPdfPreviewOpen] = useState(false);
-  const isModerator = role === 'moderator';
+  const claimsReadOnly = !canWriteClaims(role);
+  const canFullPartsCrud = canManagePartsCrud(role);
+  const partsFieldsReadOnly = claimsReadOnly || !canFullPartsCrud;
   const fileInputRef = useRef(null);
   const tabRailRef = useRef(null);
 
@@ -2553,9 +2511,9 @@ function ClaimModal({
   };
 
   useEffect(() => {
-    setTab('overview');
+    setTab(initialTab || 'overview');
     setMemberSubmissionDirty(false);
-  }, [claimItem.id, claimItem._id]);
+  }, [claimItem.id, claimItem._id, initialTab]);
 
   useEffect(() => {
     const rail = tabRailRef.current;
@@ -2595,7 +2553,7 @@ function ClaimModal({
   };
 
   const handleSaveQuotePrice = async () => {
-    if (isModerator || !onUpdatePrices) return;
+    if (claimsReadOnly || !onUpdatePrices) return;
     const amount = parseMoneyInput(priceDraft.quote);
     if (amount == null) {
       window.alert('Enter a quote price before saving.');
@@ -2616,7 +2574,7 @@ function ClaimModal({
   };
 
   const handleSaveInsurancePrice = async () => {
-    if (isModerator || !onUpdatePrices) return;
+    if (claimsReadOnly || !onUpdatePrices) return;
     const amount = parseMoneyInput(priceDraft.insurance);
     if (amount == null) {
       window.alert('Enter an insurance company price before saving.');
@@ -2637,7 +2595,7 @@ function ClaimModal({
   };
 
   const handleSaveAdminNote = async () => {
-    if (isModerator || !onSaveAdminNote) return;
+    if (claimsReadOnly || !onSaveAdminNote) return;
     const wasUpdate = (claimItem.adminNote ?? '').trim().length > 0;
     setAdminNoteSave('saving');
     setAdminNoteSaveKind(null);
@@ -2719,29 +2677,35 @@ function ClaimModal({
   const savedPaymentStatus = normalizePaymentStatus(claimItem.paymentStatus);
   const isPaymentDirty = paymentStatusDraft !== savedPaymentStatus;
 
-  const updatePartDraft = (partId, field, raw) => {
+  const updatePartDraft = (partId, field, raw, linkSnapshot = null) => {
     setPartsDraft((rows) =>
-      rows.map((p) => {
-        if (p.id !== partId) return p;
-        if (field === 'amount' || field === 'quotePrice') {
-          const s = String(raw).replace(/,/g, '');
-          if (s === '' || /^\d*\.?\d*$/.test(s)) return { ...p, [field]: s };
-          return p;
-        }
-        return { ...p, [field]: raw };
-      }),
+      rows.map((p) => (p.id !== partId ? p : updatePartInList(p, field, raw, linkSnapshot))),
     );
     if (partsSave === 'saved') setPartsSave('idle');
     setPartsSaveKind(null);
   };
-  const addPart = () => {
-    if (isModerator) return;
-    setPartsDraft((rows) => [...rows, newPartLine()]);
+  const applyPartSuggestionToDraft = (partId, suggestion) => {
+    setPartsDraft((rows) => rows.map((p) => (p.id !== partId ? p : applyPartSuggestion(p, suggestion))));
     if (partsSave === 'saved') setPartsSave('idle');
     setPartsSaveKind(null);
   };
+  const addPart = (templatePart = null) => {
+    if (claimsReadOnly || !canFullPartsCrud) return;
+    const template =
+      templatePart ?? (partsDraft.length > 0 ? partsDraft[partsDraft.length - 1] : null);
+    const line = template
+      ? applySharedContextToPart(newPartLine(), extractPartSharedContext(template))
+      : newPartLine();
+    setPartsDraft((rows) => [...rows, line]);
+    if (partsSave === 'saved') setPartsSave('idle');
+    setPartsSaveKind(null);
+  };
+  const addPartLike = (fromPartId) => {
+    const template = partsDraft.find((row) => row.id === fromPartId);
+    addPart(template || null);
+  };
   const removePart = (partId) => {
-    if (isModerator) return;
+    if (claimsReadOnly || !canFullPartsCrud) return;
     setPartsDraft((rows) => rows.filter((p) => p.id !== partId));
     if (partsSave === 'saved') setPartsSave('idle');
     setPartsSaveKind(null);
@@ -2765,7 +2729,7 @@ function ClaimModal({
   };
 
   const removePartInvoice = async (partId, invoiceId) => {
-    if (isModerator) return;
+    if (claimsReadOnly) return;
     const part = partsDraft.find((p) => p.id === partId);
     const inv = (part?.invoices ?? []).find((row) => row.id === invoiceId);
     if (!inv) return;
@@ -2789,7 +2753,7 @@ function ClaimModal({
   const handlePartInvoiceUpload = async (partId, ev) => {
     const file = ev.target.files?.[0];
     ev.target.value = '';
-    if (!file || isModerator || !authToken) return;
+    if (!file || claimsReadOnly || !authToken) return;
     if (file.type !== 'application/pdf' && !/\.pdf$/i.test(file.name)) {
       window.alert('Please upload a PDF invoice.');
       return;
@@ -2827,30 +2791,58 @@ function ClaimModal({
   };
 
   const addQuote = () => {
-    if (isModerator) return;
+    if (claimsReadOnly) return;
     setQuoteOptionsDraft((rows) => [...rows, newQuoteLine()]);
     if (repairQuotesSave === 'saved') setRepairQuotesSave('idle');
     setRepairQuotesSaveKind(null);
   };
 
   const handleSaveParts = async () => {
-    if (isModerator || !onSaveParts) return;
+    if (claimsReadOnly) return;
     const wasUpdate = hasSavedParts;
     setPartsSave('saving');
     setPartsSaveKind(null);
     try {
-      const updated = await onSaveParts(partsDraft);
-      setPartsDraft(cloneParts(updated.parts));
+      if (canFullPartsCrud && onSaveParts) {
+        const updated = await onSaveParts(partsDraft);
+        setPartsDraft(cloneParts(updated.parts));
+      } else {
+        const claimId = claimMongoId(claimItem);
+        if (!claimId || !authToken) throw new Error('Invalid claim');
+        const savedSnap = partsSnapshot(savedParts);
+        const savedIds = new Set(savedSnap.map((s) => s.id));
+        let lastParts = savedParts;
+        for (const p of partsDraft) {
+          const snap = partsSnapshot([p])[0];
+          if (!savedIds.has(snap.id)) {
+            const res = await api.createPartLine(authToken, claimId, api.mapPartsForApi([p])[0]);
+            if (res.claim?.parts) lastParts = res.claim.parts;
+            continue;
+          }
+          const prev = savedSnap.find((s) => s.id === snap.id);
+          if (!prev) continue;
+          const statusChanged = snap.status !== prev.status;
+          const invChanged = JSON.stringify(snap.invoices) !== JSON.stringify(prev.invoices);
+          if (!statusChanged && !invChanged) continue;
+          const res = await api.patchPartLine(authToken, claimId, p.id, {
+            status: snap.status,
+            invoices: snap.invoices,
+          });
+          if (res.claim?.parts) lastParts = res.claim.parts;
+        }
+        setPartsDraft(cloneParts(lastParts));
+        patch((prev) => ({ ...prev, parts: lastParts }));
+      }
       setPartsSaveKind(wasUpdate ? 'updated' : 'saved');
       setPartsSave('saved');
     } catch (e) {
       setPartsSave('error');
-      window.alert(e?.message ? String(e.message) : 'Could not save purchase lines.');
+      window.alert(e?.message ? String(e.message) : 'Could not save parts.');
     }
   };
 
   const handleSaveRepairQuotes = async () => {
-    if (isModerator || !onSaveQuoteWorkspace) return;
+    if (claimsReadOnly || !onSaveQuoteWorkspace) return;
     const wasUpdate = hasSavedRepairQuotes;
     setRepairQuotesSave('saving');
     setRepairQuotesSaveKind(null);
@@ -2872,7 +2864,7 @@ function ClaimModal({
   };
 
   const handleSavePaymentStatus = async () => {
-    if (isModerator || !onSavePaymentStatus) return;
+    if (claimsReadOnly || !onSavePaymentStatus) return;
     const wasUpdate = true;
     setPaymentSave('saving');
     setPaymentSaveKind(null);
@@ -2890,7 +2882,7 @@ function ClaimModal({
   const handlePdfInput = async (ev) => {
     const picked = [...(ev.target.files || [])].filter((f) => f.type === 'application/pdf');
     ev.target.value = '';
-    if (!picked.length || isModerator) return;
+    if (!picked.length || claimsReadOnly) return;
     const MAX_FALLBACK_BYTES = Number(import.meta.env.VITE_MAX_ADMIN_PDF_BYTES || 25 * 1024 * 1024);
     const ok = [];
     const skip = [];
@@ -2930,7 +2922,7 @@ function ClaimModal({
   };
 
   const removePdf = async (fileId) => {
-    if (isModerator) return;
+    if (claimsReadOnly) return;
     const list = claimItem.caseFiles ?? [];
     const target = list.find((f) => f.id === fileId);
     const remote = authToken && target?.url?.startsWith('/uploads/');
@@ -3016,7 +3008,7 @@ function ClaimModal({
                 Unsaved edits
               </span>
             ) : null}
-            {isModerator && (
+            {claimsReadOnly && (
               <span className="hidden rounded-lg border border-zinc-300/90 bg-zinc-100 px-2 py-0.5 text-2xs font-semibold uppercase tracking-wide text-zinc-800 shadow-inner sm:inline-flex">
                 View only
               </span>
@@ -3086,8 +3078,8 @@ function ClaimModal({
             {tab === 'submission' && (
               <MemberSubmissionPanel
                 claimItem={claimItem}
-                readOnly={isModerator}
-                onSaveSection={isModerator ? undefined : onSaveMemberSubmission}
+                readOnly={claimsReadOnly}
+                onSaveSection={claimsReadOnly ? undefined : onSaveMemberSubmission}
                 onDirtyChange={setMemberSubmissionDirty}
               />
             )}
@@ -3149,7 +3141,7 @@ function ClaimModal({
                         >
                           Open full submission
                         </button>
-                        {!isModerator ? (
+                        {!claimsReadOnly ? (
                           <button
                             type="button"
                             onClick={() => navigateTab('quotes')}
@@ -3253,9 +3245,9 @@ function ClaimModal({
                           : undefined
                       }
                     />
-                    <SummaryItem label="Purchase" value={partsSummaryText} />
+                    <SummaryItem label="Parts" value={partsSummaryText} />
                   </dl>
-                  {!isModerator && (
+                  {!claimsReadOnly && (
                     <div className="mt-4 rounded-xl border border-indigo-200/90 bg-indigo-50/70 p-3.5">
                       <p className="text-xs leading-relaxed text-indigo-950">
                         Changes save to Horizon API (insurance quote, purchase lines, notes). Upload PDFs on the insurance quote tab.
@@ -3344,7 +3336,7 @@ function ClaimModal({
                     />
                   </div>
                 </div>
-                {!isModerator && onRequestDelete ? (
+                {!claimsReadOnly && onRequestDelete ? (
                   <section className="rounded-xl border border-rose-200/90 bg-rose-50/40 p-4 shadow-inner">
                     <h3 className="text-[13px] font-semibold text-rose-950">Danger zone</h3>
                     <p className="mt-1 text-2xs leading-relaxed text-rose-900/80">
@@ -3381,13 +3373,13 @@ function ClaimModal({
                     >
                       Open evidence
                     </button>
-                    {!isModerator ? (
+                    {!claimsReadOnly ? (
                       <button
                         type="button"
-                        onClick={() => navigateTab('payments')}
+                        onClick={() => navigateTab('parts')}
                         className="inline-flex h-9 items-center rounded-lg border border-zinc-200 bg-white px-3 text-2xs font-semibold text-zinc-800 shadow-sm transition hover:bg-zinc-50"
                       >
-                        Open purchase files
+                        Open parts tab
                       </button>
                     ) : null}
                   </div>
@@ -3534,7 +3526,7 @@ function ClaimModal({
                         Quote price
                       </label>
                       <p className="mt-0.5 text-2xs text-zinc-500">Set by Horizon Smash Repairs</p>
-                      {!isModerator ? (
+                      {!claimsReadOnly ? (
                         <>
                           <input
                             id={`quote-price-${claimItem.id}`}
@@ -3597,7 +3589,7 @@ function ClaimModal({
                         Insurance company price
                       </label>
                       <p className="mt-0.5 text-2xs text-zinc-500">Authorized amount</p>
-                      {!isModerator ? (
+                      {!claimsReadOnly ? (
                         <>
                           <input
                             id={`insurance-approved-${claimItem.id}`}
@@ -3665,7 +3657,7 @@ function ClaimModal({
                         (defaults to 25&nbsp;MB per file).
                       </p>
                     </div>
-                    {!isModerator && (
+                    {!claimsReadOnly && (
                       <>
                         <input
                           ref={fileInputRef}
@@ -3710,7 +3702,7 @@ function ClaimModal({
                           >
                             Open
                           </a>
-                          {!isModerator && (
+                          {!claimsReadOnly && (
                             <button
                               type="button"
                               disabled={pdfBusy}
@@ -3735,7 +3727,7 @@ function ClaimModal({
                         Optional workshop lines. Add notes on each quote for internal context.
                       </p>
                     </div>
-                    {!isModerator && (
+                    {!claimsReadOnly && (
                       <button
                         type="button"
                         onClick={addQuote}
@@ -3757,7 +3749,7 @@ function ClaimModal({
                           key={q.id}
                           className="rounded-xl border border-zinc-200/90 bg-zinc-50/40 px-4 py-4 shadow-inner"
                         >
-                          {!isModerator ? (
+                          {!claimsReadOnly ? (
                             <div className="space-y-3">
                               <input
                                 type="text"
@@ -3808,7 +3800,7 @@ function ClaimModal({
                     ))}
                   </div>
                   )}
-                  {!isModerator && (
+                  {!claimsReadOnly && (
                     <div className="mt-4">
                       <button
                         type="button"
@@ -3857,7 +3849,7 @@ function ClaimModal({
                         <select
                           id={`pay-status-${claimItem.id}`}
                           value={paymentStatus}
-                          disabled={isModerator}
+                          disabled={claimsReadOnly}
                           onChange={(e) => {
                             setPaymentStatusDraft(normalizePaymentStatus(e.target.value));
                             if (paymentSave === 'saved') setPaymentSave('idle');
@@ -3872,7 +3864,7 @@ function ClaimModal({
                           ))}
                         </select>
                       </div>
-                      {!isModerator && (
+                      {!claimsReadOnly && (
                         <button
                           type="button"
                           onClick={handleSavePaymentStatus}
@@ -3905,7 +3897,7 @@ function ClaimModal({
                 <section className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner sm:p-5">
                   <h3 className="text-[13px] font-semibold text-zinc-900">Admin note</h3>
                   <p className="mt-1 text-2xs text-zinc-600">
-                    Internal notes visible to administrators and moderators on this case file.
+                    Internal notes visible to staff on this case file.
                   </p>
                   <label htmlFor={`admin-note-${claimItem.id}`} className="sr-only">
                     Admin note
@@ -3913,10 +3905,10 @@ function ClaimModal({
                   <textarea
                     id={`admin-note-${claimItem.id}`}
                     rows={5}
-                    value={isModerator ? adminNote : adminNoteDraft}
-                    readOnly={isModerator}
+                    value={claimsReadOnly ? adminNote : adminNoteDraft}
+                    readOnly={claimsReadOnly}
                     onChange={(e) => {
-                      if (isModerator) return;
+                      if (claimsReadOnly) return;
                       setAdminNoteDraft(e.target.value);
                       if (adminNoteSave === 'saved') setAdminNoteSave('idle');
                       setAdminNoteSaveKind(null);
@@ -3924,7 +3916,7 @@ function ClaimModal({
                     placeholder="e.g. Called member — awaiting bank details."
                     className="mt-3 w-full resize-y rounded-lg border border-zinc-200 bg-white px-3 py-2.5 text-sm text-zinc-900 shadow-inner outline-none placeholder:text-zinc-400 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/15 read-only:bg-zinc-50 read-only:text-zinc-700"
                   />
-                  {!isModerator && (
+                  {!claimsReadOnly && (
                     <>
                       <button
                         type="button"
@@ -3962,7 +3954,7 @@ function ClaimModal({
               </div>
             )}
 
-            {tab === 'payments' && (
+            {tab === 'parts' && (
               <div className="space-y-6">
                 <section className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner sm:p-5">
                   <div className="flex flex-wrap items-center justify-between gap-3">
@@ -3971,28 +3963,39 @@ function ClaimModal({
                         <Package className="h-5 w-5" strokeWidth={2} />
                       </span>
                       <div>
-                        <h3 className="text-[13px] font-semibold text-zinc-900">Purchase</h3>
+                        <h3 className="text-[13px] font-semibold text-zinc-900">Parts</h3>
                         <p className="mt-1 text-2xs leading-relaxed text-zinc-600 sm:text-xs">
-                          Supplier, part details, dates, invoice upload (PDF), and line status. Save purchase lines when finished.
+                          Supplier, part details, dates, invoice upload (PDF), and line status. Super administrators can edit all fields; administrators can update status and invoices.
                         </p>
                       </div>
                     </div>
-                    {!isModerator && (
-                      <button
-                        type="button"
-                        onClick={addPart}
-                        className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-indigo-200/90 bg-indigo-50 px-2.5 text-2xs font-semibold text-indigo-900 hover:bg-indigo-100"
-                      >
-                        <Plus className="h-3.5 w-3.5" strokeWidth={2} />
-                        Add part line
-                      </button>
-                    )}
+                    {!claimsReadOnly && canFullPartsCrud ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => addPart()}
+                          className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-indigo-200/90 bg-indigo-50 px-2.5 text-2xs font-semibold text-indigo-900 hover:bg-indigo-100"
+                        >
+                          <Plus className="h-3.5 w-3.5" strokeWidth={2} />
+                          Add part line
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => addPart(partsDraft[partsDraft.length - 1])}
+                          disabled={partsDraft.length === 0}
+                          className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-zinc-200/90 bg-white px-2.5 text-2xs font-semibold text-zinc-800 hover:bg-zinc-50 disabled:opacity-50"
+                        >
+                          <Plus className="h-3.5 w-3.5" strokeWidth={2} />
+                          Add another (same supplier & dates)
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
 
                   {parts.length === 0 ? (
                     <p className="mt-4 rounded-xl border border-dashed border-zinc-200 bg-zinc-50 px-4 py-8 text-center text-sm text-zinc-500">
                       No part lines yet.
-                      {!isModerator && ' Use Add part line to create a row.'}
+                      {!claimsReadOnly && ' Use Add part line to create a row.'}
                     </p>
                   ) : (
                     <div className="mt-4 space-y-4">
@@ -4003,151 +4006,44 @@ function ClaimModal({
                         >
                           <div className="mb-3 flex items-center justify-between gap-2">
                             <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">
-                              Purchase line {index + 1}
+                              Part line {index + 1}
                             </p>
-                            {!isModerator && (
-                              <button
-                                type="button"
-                                onClick={() => removePart(p.id)}
-                                className="rounded-lg border border-rose-200/90 p-1.5 text-rose-700 hover:bg-rose-50"
-                                aria-label="Remove purchase line"
-                              >
-                                <Trash2 className="h-4 w-4" strokeWidth={2} />
-                              </button>
+                            {!claimsReadOnly && canFullPartsCrud && (
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => addPartLike(p.id)}
+                                  className="rounded-lg border border-zinc-200/90 p-1.5 text-zinc-700 hover:bg-zinc-50"
+                                  title="Add new line with same supplier and dates"
+                                  aria-label="Copy supplier and dates to new line"
+                                >
+                                  <Copy className="h-4 w-4" strokeWidth={2} />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => removePart(p.id)}
+                                  className="rounded-lg border border-rose-200/90 p-1.5 text-rose-700 hover:bg-rose-50"
+                                  aria-label="Remove purchase line"
+                                >
+                                  <Trash2 className="h-4 w-4" strokeWidth={2} />
+                                </button>
+                              </div>
                             )}
                           </div>
-                          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                            <PurchaseField label="Supplier name">
-                              {!isModerator ? (
-                                <input
-                                  type="text"
-                                  value={p.company}
-                                  onChange={(e) => updatePartDraft(p.id, 'company', e.target.value)}
-                                  className={purchaseInputClass}
-                                  placeholder="Supplier name"
-                                />
-                              ) : (
-                                <span className="text-sm text-zinc-900">{p.company || '—'}</span>
-                              )}
-                            </PurchaseField>
-                            <PurchaseField label="Parts name">
-                              {!isModerator ? (
-                                <input
-                                  type="text"
-                                  value={p.partName ?? ''}
-                                  onChange={(e) => updatePartDraft(p.id, 'partName', e.target.value)}
-                                  className={purchaseInputClass}
-                                  placeholder="Parts name"
-                                />
-                              ) : (
-                                <span className="text-sm text-zinc-900">{p.partName || '—'}</span>
-                              )}
-                            </PurchaseField>
-                            <PurchaseField label="Amount (AUD)">
-                              {!isModerator ? (
-                                <input
-                                  type="text"
-                                  inputMode="decimal"
-                                  value={partAmountInputValue(p.amount)}
-                                  onChange={(e) => updatePartDraft(p.id, 'amount', e.target.value)}
-                                  placeholder="0.00"
-                                  className={`${purchaseInputClass} font-mono`}
-                                />
-                              ) : (
-                                <span className="font-mono text-sm text-zinc-900">
-                                  {formatAud(partAmountNumber(p.amount))}
-                                </span>
-                              )}
-                            </PurchaseField>
-                            <PurchaseField label="Quote price (AUD)">
-                              {!isModerator ? (
-                                <input
-                                  type="text"
-                                  inputMode="decimal"
-                                  value={partAmountInputValue(p.quotePrice)}
-                                  onChange={(e) => updatePartDraft(p.id, 'quotePrice', e.target.value)}
-                                  placeholder="Manual quote"
-                                  className={`${purchaseInputClass} font-mono`}
-                                />
-                              ) : (
-                                <span className="font-mono text-sm text-zinc-900">
-                                  {partOptionalMoneyNumber(p.quotePrice) == null
-                                    ? '—'
-                                    : formatAud(partOptionalMoneyNumber(p.quotePrice))}
-                                </span>
-                              )}
-                              {partOptionalMoneyNumber(p.quotePrice) != null ? (
-                                <p className="mt-1 text-2xs text-zinc-500">
-                                  Difference: {formatAud(partAmountNumber(p.amount) - partOptionalMoneyNumber(p.quotePrice))}
-                                </p>
-                              ) : null}
-                            </PurchaseField>
-                            <PurchaseField label="Order date">
-                              {!isModerator ? (
-                                <input
-                                  type="date"
-                                  value={p.orderDate ?? ''}
-                                  onChange={(e) => updatePartDraft(p.id, 'orderDate', e.target.value)}
-                                  className={purchaseInputClass}
-                                />
-                              ) : (
-                                <span className="text-sm text-zinc-900">{p.orderDate || '—'}</span>
-                              )}
-                            </PurchaseField>
-                            <PurchaseField label="Tentative received date">
-                              {!isModerator ? (
-                                <input
-                                  type="date"
-                                  value={p.tentativeReceivedDate ?? ''}
-                                  onChange={(e) =>
-                                    updatePartDraft(p.id, 'tentativeReceivedDate', e.target.value)
-                                  }
-                                  className={purchaseInputClass}
-                                />
-                              ) : (
-                                <span className="text-sm text-zinc-900">{p.tentativeReceivedDate || '—'}</span>
-                              )}
-                            </PurchaseField>
-                            <PurchaseField label="Received by">
-                              {!isModerator ? (
-                                <input
-                                  type="text"
-                                  value={p.receivedBy ?? ''}
-                                  onChange={(e) => updatePartDraft(p.id, 'receivedBy', e.target.value)}
-                                  className={purchaseInputClass}
-                                  placeholder="Name"
-                                />
-                              ) : (
-                                <span className="text-sm text-zinc-900">{p.receivedBy || '—'}</span>
-                              )}
-                            </PurchaseField>
-                            <PurchaseField label="Line status">
-                              {!isModerator ? (
-                                <select
-                                  value={p.status === 'completed' ? 'completed' : 'pending'}
-                                  onChange={(e) => updatePartDraft(p.id, 'status', e.target.value)}
-                                  className={purchaseInputClass}
-                                >
-                                  {PART_STATUS_OPTIONS.map((opt) => (
-                                    <option key={opt.id} value={opt.id}>
-                                      {opt.label}
-                                    </option>
-                                  ))}
-                                </select>
-                              ) : (
-                                <PartStatusBadge status={p.status} />
-                              )}
-                            </PurchaseField>
-                          </div>
-                          <PurchaseInvoicesSection
+                          <PartLineFields
                             part={p}
-                            isModerator={isModerator}
+                            token={authToken}
+                            catalogLinkSnapshot={catalogLinkSnapshot(p)}
+                            detailsReadOnly={partsFieldsReadOnly && savedParts.some((s) => s.id === p.id)}
+                            readOnly={claimsReadOnly}
                             partNextInvoiceNumber={partNextInvoiceNumber[p.id] ?? ''}
                             onNextInvoiceNumberChange={(value) =>
                               setPartNextInvoiceNumber((prev) => ({ ...prev, [p.id]: value }))
                             }
                             partInvoiceBusyId={partInvoiceBusyId}
                             onUpload={(e) => handlePartInvoiceUpload(p.id, e)}
+                            onFieldChange={updatePartDraft}
+                            onApplySuggestion={applyPartSuggestionToDraft}
                             onInvoiceNumberChange={(invoiceId, value) =>
                               updatePartInvoiceNumber(p.id, invoiceId, value)
                             }
@@ -4157,7 +4053,7 @@ function ClaimModal({
                       ))}
                     </div>
                   )}
-                  {!isModerator && (
+                  {!claimsReadOnly && (
                     <div className="mt-4">
                       <button
                         type="button"
@@ -4168,7 +4064,7 @@ function ClaimModal({
                         {saveUpdateLabel({
                           hasSaved: hasSavedParts,
                           busy: partsSave === 'saving',
-                          entity: 'purchase lines',
+                          entity: 'parts',
                         })}
                       </button>
                       {partsSave === 'saved' && (
@@ -4202,7 +4098,7 @@ function ClaimModal({
           onPrint={() => openClaimExportPrint(exportHtml)}
         />
 
-          {isModerator ? (
+          {claimsReadOnly ? (
             <div className="flex shrink-0 flex-col gap-3 border-t border-zinc-200/90 bg-zinc-50/95 px-4 py-4 backdrop-blur-sm sm:flex-row sm:items-center sm:justify-between sm:px-6">
               <p className="text-2xs leading-relaxed text-zinc-600 sm:max-w-xl sm:text-xs">
                 This case file is read-only. You can read every tab and field shown to administrators; you cannot change
