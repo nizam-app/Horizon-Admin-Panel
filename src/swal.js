@@ -36,14 +36,43 @@ export function alertWarning(message, title = 'Please check') {
   });
 }
 
-export function confirmDialog(message, title = 'Are you sure?') {
+export function alertInfo(message, title = '') {
   return Swal.fire({
     ...base,
-    icon: 'question',
+    icon: 'info',
+    ...(title ? { title } : {}),
+    text: String(message || ''),
+  });
+}
+
+/** Generic message dialog (replaces `window.alert`). */
+export function alertMessage(message, title = 'Notice') {
+  return Swal.fire({
+    ...base,
+    icon: 'info',
+    title,
+    text: String(message || ''),
+    confirmButtonText: 'OK',
+  });
+}
+
+export function confirmDialog(message, title = 'Are you sure?', options = {}) {
+  return Swal.fire({
+    ...base,
+    icon: options.icon || 'question',
     title,
     text: String(message || ''),
     showCancelButton: true,
-    confirmButtonText: 'Yes',
-    cancelButtonText: 'Cancel',
+    confirmButtonText: options.confirmButtonText || 'Yes',
+    cancelButtonText: options.cancelButtonText || 'Cancel',
+    confirmButtonColor: options.danger ? '#e11d48' : base.confirmButtonColor,
   }).then((result) => result.isConfirmed);
+}
+
+export function confirmDelete(message, title = 'Delete?') {
+  return confirmDialog(message, title, {
+    icon: 'warning',
+    confirmButtonText: 'Delete',
+    danger: true,
+  });
 }

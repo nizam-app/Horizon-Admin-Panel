@@ -3,6 +3,7 @@
 import { damageDiagramExportHtml } from './DamageDiagramViewer.jsx';
 import { resolveDamageDiagramFromDamage } from './memberSubmissionUtils.js';
 import { apiBase } from './api.js';
+import { alertWarning } from './swal.js';
 
 function esc(value) {
   return String(value ?? '')
@@ -406,7 +407,7 @@ export function buildClaimExportHtml(item, meta) {
 export function openClaimExportPrint(html) {
   const printable = window.open('', '_blank', 'width=1100,height=900');
   if (!printable) {
-    window.alert('Pop-up blocked. Allow pop-ups to export PDF, then try again.');
+    void alertWarning('Allow pop-ups to export PDF, then try again.', 'Pop-up blocked');
     return;
   }
   printable.document.write(html);

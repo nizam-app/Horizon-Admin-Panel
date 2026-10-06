@@ -3,6 +3,7 @@ import { CheckCircle2, ChevronLeft, ChevronRight, Eye, ExternalLink, Loader2, Pl
 
 import { DamageDiagramViewer } from './DamageDiagramViewer.jsx';
 import * as api from './api.js';
+import { alertError } from './swal.js';
 import {
   buildAllSubmissionDrafts,
   CHECKLIST_LABELS,
@@ -375,7 +376,7 @@ function AttachmentEditor({ title, files, onChange }) {
       for (const file of picked) added.push(await fileToAttachment(file));
       onChange([...list, ...added]);
     } catch (e) {
-      window.alert(e?.message || 'Could not add file');
+      void alertError(e?.message || 'Could not add file');
     } finally {
       setBusy(false);
       if (inputRef.current) inputRef.current.value = '';

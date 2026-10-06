@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { CalendarClock, Clock, Pencil, Trash2, UserRound } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { CalendarClock, ChevronLeft, ChevronRight, Clock, Download, Pencil, Trash2, UserRound } from 'lucide-react';
 import * as api from './api.js';
 import { inputClass, labelClass, useHrLoadError } from './hrPanelUtils.js';
 import { PickerInput } from './PickerInput.jsx';
@@ -15,6 +15,10 @@ import {
   hrPrimaryBtn,
   hrSecondaryBtn,
 } from './hr/HrUi.jsx';
+import { attendanceTimeRangeError, hoursFromAttendanceRow } from './hr/payrollUtils.js';
+import { alertError, confirmDelete } from './swal.js';
+
+const ATTENDANCE_PAGE_SIZE = 10;
 
 const STATUS_OPTIONS = ['present', 'absent', 'leave', 'half-day'];
 
@@ -75,7 +79,9 @@ function filterMetaLine(listFilter, loading, count) {
   const parts = [];
   parts.push(loading ? 'Loading records…' : `${count} record${count === 1 ? '' : 's'}`);
   if (listFilter.name) parts.push(`name “${listFilter.name}”`);
-  if (listFilter.from || listFilter.to) {
+  if (!listFilter.from && !listFilter.to) {
+    parts.push('all dates');
+  } else if (listFilter.from || listFilter.to) {
     const range =
       listFilter.from && listFilter.to && listFilter.from === listFilter.to
         ? listFilter.from
@@ -83,6 +89,45 @@ function filterMetaLine(listFilter, loading, count) {
     parts.push(range);
   }
   return parts.join(' · ');
+}
+
+function AttendancePaginationBar({ page, total, onPageChange }) {
+  const totalPages = Math.max(1, Math.ceil(total / ATTENDANCE_PAGE_SIZE));
+  if (total <= ATTENDANCE_PAGE_SIZE) return null;
+  const from = (page - 1) * ATTENDANCE_PAGE_SIZE + 1;
+  const to = Math.min(page * ATTENDANCE_PAGE_SIZE, total);
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 bg-zinc-50/40 px-4 py-3 text-2xs text-zinc-600 sm:px-5">
+      <span>
+        Showing <span className="font-medium text-zinc-800">{from}–{to}</span> of{' '}
+        <span className="font-medium text-zinc-800">{total}</span>
+        <span className="mx-2 text-zinc-300">·</span>
+        Page <span className="font-medium text-zinc-800">{page}</span> of {totalPages}
+      </span>
+      <div className="flex items-center gap-1.5">
+        <button
+          type="button"
+          disabled={page <= 1}
+          onClick={() => onPageChange(page - 1)}
+          className={hrSecondaryBtn}
+          aria-label="Previous page"
+        >
+          <ChevronLeft className="h-4 w-4" strokeWidth={2} aria-hidden />
+          Previous
+        </button>
+        <button
+          type="button"
+          disabled={page >= totalPages}
+          onClick={() => onPageChange(page + 1)}
+          className={hrSecondaryBtn}
+          aria-label="Next page"
+        >
+          Next
+          <ChevronRight className="h-4 w-4" strokeWidth={2} aria-hidden />
+        </button>
+      </div>
+    </div>
+  );
 }
 
 async function resolveExistingRecord(token, employeeId, date, rows) {
@@ -110,16 +155,33 @@ export function AttendancePanel({ token, onAuthError }) {
   const [rowDrafts, setRowDrafts] = useState({});
   const [rowSaving, setRowSaving] = useState({});
   const [listFilter, setListFilter] = useState({
-    from: localTodayIso(),
-    to: localTodayIso(),
+    from: '',
+    to: '',
     employeeId: '',
     name: '',
   });
   const [nameDraft, setNameDraft] = useState('');
   const nameDebounceRef = useRef(null);
   const [formExistingId, setFormExistingId] = useState(null);
+  const [downloading, setDownloading] = useState(false);
+  const [listPage, setListPage] = useState(1);
+  const formSectionRef = useRef(null);
 
   const employeeName = (id) => employees.find((e) => e.id === id)?.displayName ?? id;
+
+  const paginatedRows = useMemo(() => {
+    const start = (listPage - 1) * ATTENDANCE_PAGE_SIZE;
+    return rows.slice(start, start + ATTENDANCE_PAGE_SIZE);
+  }, [rows, listPage]);
+
+  useEffect(() => {
+    setListPage(1);
+  }, [listFilter.from, listFilter.to, listFilter.employeeId, listFilter.name]);
+
+  useEffect(() => {
+    const totalPages = Math.max(1, Math.ceil(rows.length / ATTENDANCE_PAGE_SIZE));
+    if (listPage > totalPages) setListPage(totalPages);
+  }, [rows.length, listPage]);
 
   const syncRowDrafts = useCallback((attendance) => {
     const next = {};
@@ -144,25 +206,29 @@ export function AttendancePanel({ token, onAuthError }) {
     }
   }, [token, onAuthError]);
 
-  const loadRows = useCallback(async () => {
-    if (!token) return;
-    setLoading(true);
-    setError('');
-    try {
-      const attOut = await api.listAttendance(token, {
-        from: listFilter.from || undefined,
-        to: listFilter.to || undefined,
-        employeeId: listFilter.employeeId || undefined,
-        q: listFilter.name || undefined,
-      });
-      setRows(attOut.attendance);
-      syncRowDrafts(attOut.attendance);
-    } catch (e) {
-      setError(useHrLoadError(e, onAuthError));
-    } finally {
-      setLoading(false);
-    }
-  }, [token, onAuthError, listFilter, syncRowDrafts]);
+  const loadRows = useCallback(
+    async (filterOverride) => {
+      if (!token) return;
+      const f = filterOverride ?? listFilter;
+      setLoading(true);
+      setError('');
+      try {
+        const attOut = await api.listAttendance(token, {
+          from: f.from || undefined,
+          to: f.to || undefined,
+          employeeId: f.employeeId || undefined,
+          q: f.name || undefined,
+        });
+        setRows(attOut.attendance);
+        syncRowDrafts(attOut.attendance);
+      } catch (e) {
+        setError(useHrLoadError(e, onAuthError));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [token, onAuthError, listFilter, syncRowDrafts]
+  );
 
   useEffect(() => {
     loadEmployees();
@@ -204,6 +270,9 @@ export function AttendancePanel({ token, onAuthError }) {
       checkOut: toTimeInputValue(row.checkOut),
       notes: '',
     });
+    window.requestAnimationFrame(() => {
+      formSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
   };
 
   const loadFormForEmployeeDate = useCallback(
@@ -222,7 +291,6 @@ export function AttendancePanel({ token, onAuthError }) {
   const onSubmit = async (e) => {
     e.preventDefault();
     if (!token || !form.employeeId) return;
-    setSaving(true);
     setError('');
     const payload = {
       employeeId: form.employeeId,
@@ -232,6 +300,12 @@ export function AttendancePanel({ token, onAuthError }) {
       checkOut: form.checkOut || '',
       notes: form.notes || '',
     };
+    const timeErr = attendanceTimeRangeError(payload);
+    if (timeErr) {
+      await alertError(timeErr, 'Invalid times');
+      return;
+    }
+    setSaving(true);
     try {
       const existing = await resolveExistingRecord(token, form.employeeId, form.date, rows);
       if (existing) {
@@ -247,12 +321,25 @@ export function AttendancePanel({ token, onAuthError }) {
           } else throw err;
         }
       }
-      if (form.date === localTodayIso()) {
-        setForm((f) => ({ ...f, notes: '', checkOut: '' }));
-      } else {
-        setForm((f) => ({ ...f, notes: '', checkIn: '', checkOut: '' }));
-      }
-      await loadRows();
+      const savedDate = form.date;
+      const nextFilter = {
+        ...listFilter,
+        from: savedDate,
+        to: savedDate,
+        name: '',
+      };
+      setListFilter(nextFilter);
+      setNameDraft('');
+      await loadRows(nextFilter);
+      setForm({
+        employeeId: '',
+        date: localTodayIso(),
+        status: 'present',
+        checkIn: '',
+        checkOut: '',
+        notes: '',
+      });
+      setFormExistingId(null);
     } catch (err) {
       setError(useHrLoadError(err, onAuthError));
     } finally {
@@ -261,17 +348,23 @@ export function AttendancePanel({ token, onAuthError }) {
   };
 
   const saveRowTimes = async (row) => {
-    if (!token || !isEditableAttendanceDate(row.date)) return;
+    if (!token) return;
     const draft = rowDrafts[row.id];
     if (!draft) return;
-    setRowSaving((s) => ({ ...s, [row.id]: true }));
     setError('');
+    const patch = {
+      checkIn: draft.checkIn || '',
+      checkOut: draft.checkOut || '',
+      status: draft.status,
+    };
+    const timeErr = attendanceTimeRangeError(patch);
+    if (timeErr) {
+      await alertError(timeErr, 'Invalid times');
+      return;
+    }
+    setRowSaving((s) => ({ ...s, [row.id]: true }));
     try {
-      await api.updateAttendance(token, row.id, {
-        checkIn: draft.checkIn || '',
-        checkOut: draft.checkOut || '',
-        status: draft.status,
-      });
+      await api.updateAttendance(token, row.id, patch);
       await loadRows();
     } catch (err) {
       setError(useHrLoadError(err, onAuthError));
@@ -281,7 +374,7 @@ export function AttendancePanel({ token, onAuthError }) {
   };
 
   const remove = async (id) => {
-    if (!token || !window.confirm('Delete this attendance entry?')) return;
+    if (!token || !(await confirmDelete('This attendance entry will be removed permanently.', 'Delete attendance?'))) return;
     try {
       await api.deleteAttendance(token, id);
       await loadRows();
@@ -292,20 +385,45 @@ export function AttendancePanel({ token, onAuthError }) {
 
   const isTodayFilter =
     listFilter.from === localTodayIso() && listFilter.to === localTodayIso();
+  const isAllDatesFilter = !listFilter.from && !listFilter.to;
+
+  const downloadStatement = async () => {
+    if (!token) return;
+    const from = listFilter.from;
+    const to = listFilter.to;
+    if (!from || !to) {
+      setError('Set both From and To dates before downloading a statement.');
+      return;
+    }
+    setDownloading(true);
+    setError('');
+    try {
+      await api.downloadAttendanceStatement(token, {
+        from,
+        to,
+        employeeId: listFilter.employeeId || undefined,
+        q: listFilter.name || undefined,
+      });
+    } catch (err) {
+      setError(useHrLoadError(err, onAuthError));
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   return (
-    <div className="mx-auto max-w-6xl space-y-5 pb-8">
+    <div className="space-y-4">
       <HrPageHeader
         icon={CalendarClock}
         title="Attendance"
-        description="Log check-in now and add check-out later the same day. Today's entries stay editable until midnight."
+        description="Log or fix any day: use Edit on a row (opens the form above), correct times in 24-hour format, then Update attendance."
       />
 
       {error ? (
         <div className="rounded-xl border border-rose-200/90 bg-rose-50 px-4 py-3 text-sm text-rose-900 shadow-sm">{error}</div>
       ) : null}
 
-      <form onSubmit={onSubmit} className={hrCardClass}>
+      <form ref={formSectionRef} onSubmit={onSubmit} className={hrCardClass}>
         <div className={hrCardHeaderClass}>
           <HrSectionTitle title="Log attendance" subtitle="Create or update a single day record" />
           {formExistingId ? (
@@ -465,13 +583,12 @@ export function AttendancePanel({ token, onAuthError }) {
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
+            <HrFilterChip
+              active={isAllDatesFilter}
               onClick={() => setListFilter((f) => ({ ...f, from: '', to: '' }))}
-              className={hrSecondaryBtn}
             >
               All dates
-            </button>
+            </HrFilterChip>
             <button
               type="button"
               onClick={() => {
@@ -481,6 +598,10 @@ export function AttendancePanel({ token, onAuthError }) {
               className={hrSecondaryBtn}
             >
               Clear filters
+            </button>
+            <button type="button" onClick={() => void downloadStatement()} disabled={downloading} className={hrSecondaryBtn}>
+              <Download className="h-3.5 w-3.5" aria-hidden />
+              {downloading ? 'Preparing…' : 'Download statement'}
             </button>
           </div>
         </HrFilterBar>
@@ -505,11 +626,12 @@ export function AttendancePanel({ token, onAuthError }) {
                     Times
                   </span>
                 </th>
+                <th className="px-4 py-3 font-semibold sm:px-5">Hours</th>
                 <th className="px-4 py-3 text-right font-semibold sm:px-5">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-100">
-              {rows.map((row) => {
+              {paginatedRows.map((row) => {
                 const editable = isEditableAttendanceDate(row.date);
                 const draft = rowDrafts[row.id];
                 const name = employeeName(row.employeeId);
@@ -539,32 +661,36 @@ export function AttendancePanel({ token, onAuthError }) {
                     </td>
                     <td className="px-4 py-3.5 sm:px-5">
                       {editable && draft ? (
-                        <div className="flex flex-wrap items-center gap-2">
-                          <PickerInput
-                            type="time"
-                            className="h-9 w-[7.25rem]"
-                            value={draft.checkIn}
-                            onChange={(ev) =>
-                              setRowDrafts((d) => ({
-                                ...d,
-                                [row.id]: { ...d[row.id], checkIn: ev.target.value },
-                              }))
-                            }
-                            aria-label="Check in"
-                          />
-                          <span className="text-zinc-300">→</span>
-                          <PickerInput
-                            type="time"
-                            className="h-9 w-[7.25rem]"
-                            value={draft.checkOut}
-                            onChange={(ev) =>
-                              setRowDrafts((d) => ({
-                                ...d,
-                                [row.id]: { ...d[row.id], checkOut: ev.target.value },
-                              }))
-                            }
-                            aria-label="Check out"
-                          />
+                        <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
+                          <div className="w-[7.25rem] shrink-0">
+                            <PickerInput
+                              type="time"
+                              className="h-9"
+                              value={draft.checkIn}
+                              onChange={(ev) =>
+                                setRowDrafts((d) => ({
+                                  ...d,
+                                  [row.id]: { ...d[row.id], checkIn: ev.target.value },
+                                }))
+                              }
+                              aria-label="Check in"
+                            />
+                          </div>
+                          <span className="hidden text-zinc-300 sm:inline">→</span>
+                          <div className="w-[7.25rem] shrink-0">
+                            <PickerInput
+                              type="time"
+                              className="h-9"
+                              value={draft.checkOut}
+                              onChange={(ev) =>
+                                setRowDrafts((d) => ({
+                                  ...d,
+                                  [row.id]: { ...d[row.id], checkOut: ev.target.value },
+                                }))
+                              }
+                              aria-label="Check out"
+                            />
+                          </div>
                           <button
                             type="button"
                             disabled={rowSaving[row.id]}
@@ -578,26 +704,27 @@ export function AttendancePanel({ token, onAuthError }) {
                         <span className="text-2xs font-medium text-zinc-600">{formatTimesDisplay(row.checkIn, row.checkOut)}</span>
                       )}
                     </td>
+                    <td className="px-4 py-3.5 tabular-nums text-zinc-700 sm:px-5">
+                      {hoursFromAttendanceRow(row)}
+                    </td>
                     <td className="px-4 py-3.5 text-right sm:px-5">
-                      <div className="inline-flex items-center gap-1 opacity-90 group-hover:opacity-100">
-                        {editable ? (
-                          <button
-                            type="button"
-                            onClick={() => loadIntoForm(row)}
-                            className="inline-flex h-8 items-center gap-1 rounded-lg px-2 text-2xs font-semibold text-indigo-600 hover:bg-indigo-50"
-                            title="Edit in form"
-                          >
-                            <Pencil className="h-3.5 w-3.5" aria-hidden />
-                            Edit
-                          </button>
-                        ) : null}
+                      <div className="inline-flex flex-wrap items-center justify-end gap-1.5 opacity-90 group-hover:opacity-100">
+                        <button
+                          type="button"
+                          onClick={() => loadIntoForm(row)}
+                          className="inline-flex h-8 items-center justify-center gap-1 rounded-lg border border-indigo-200/90 bg-indigo-50 px-2.5 text-2xs font-semibold text-indigo-900 shadow-sm transition hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/60"
+                          title="Edit in form above"
+                        >
+                          <Pencil className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+                          Edit
+                        </button>
                         <button
                           type="button"
                           onClick={() => remove(row.id)}
-                          className="inline-flex h-8 items-center gap-1 rounded-lg px-2 text-2xs font-semibold text-rose-600 hover:bg-rose-50"
+                          className="inline-flex h-8 items-center justify-center gap-1 rounded-lg border border-rose-200/90 bg-rose-50 px-2.5 text-2xs font-semibold text-rose-800 shadow-sm transition hover:bg-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400/60"
                           title="Delete"
                         >
-                          <Trash2 className="h-3.5 w-3.5" aria-hidden />
+                          <Trash2 className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
                           Delete
                         </button>
                       </div>
@@ -607,7 +734,7 @@ export function AttendancePanel({ token, onAuthError }) {
               })}
               {!loading && rows.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="px-4 py-16 text-center sm:px-5">
+                  <td colSpan={6} className="px-4 py-16 text-center sm:px-5">
                     <div className="mx-auto flex max-w-sm flex-col items-center gap-2">
                       <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-zinc-100 text-zinc-400">
                         <UserRound className="h-6 w-6" strokeWidth={1.75} aria-hidden />
@@ -621,6 +748,7 @@ export function AttendancePanel({ token, onAuthError }) {
             </tbody>
           </table>
         </div>
+        <AttendancePaginationBar page={listPage} total={rows.length} onPageChange={setListPage} />
       </div>
     </div>
   );

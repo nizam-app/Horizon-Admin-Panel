@@ -1,6 +1,7 @@
 /** Horizon admin API helpers (pairs with horizon-backend). */
 
 import { apiBase as resolvedApiBase, requireApiBase } from './apiBase.js';
+import { downloadBlobResponse } from './hr/downloadCsv.js';
 
 export function apiBase() {
   return resolvedApiBase();
@@ -202,13 +203,19 @@ export function claimFromApi(raw) {
  * (Claim status uses the same endpoint via patchClaimStatus. PDFs use POST/DELETE /files.)
  */
 export function mapQuoteOptionsForApi(quoteOptions) {
-  return (quoteOptions || []).map((q) => ({
-    id: String(q.id || '').trim() || `quote-${Date.now()}`,
-    supplier: String(q.supplier ?? '').trim(),
-    amount: typeof q.amount === 'number' && !Number.isNaN(q.amount) ? q.amount : Number(q.amount) || 0,
-    reference: String(q.reference ?? '').trim(),
-    notes: String(q.notes ?? '').trim(),
-  }));
+  return (quoteOptions || []).map((q) => {
+    const fileId = q.fileId == null || q.fileId === '' ? null : String(q.fileId).trim();
+    return {
+      id: String(q.id || '').trim() || `quote-${Date.now()}`,
+      supplier: String(q.supplier ?? '').trim(),
+      amount: typeof q.amount === 'number' && !Number.isNaN(q.amount) ? q.amount : Number(q.amount) || 0,
+      reference: String(q.reference ?? '').trim(),
+      notes: String(q.notes ?? '').trim(),
+      fileId,
+      fileName: String(q.fileName ?? '').trim(),
+      fileUrl: String(q.fileUrl ?? '').trim(),
+    };
+  });
 }
 
 function mapPartDateForApi(raw) {
@@ -493,12 +500,14 @@ export async function patchClaimStatus(token, id, status) {
   return patchClaimWorkspace(token, id, { status });
 }
 
-export async function uploadClaimPdf(token, claimId, file) {
+export async function uploadClaimPdf(token, claimId, file, { kind } = {}) {
   const id = normalizeClaimId(claimId);
   if (!id) throw new Error('Invalid claim id');
   const fd = new FormData();
   fd.append('pdf', file, file.name);
-  const res = await fetch(`${requireApiBase()}/v1/admin/claims/${encodeURIComponent(id)}/files`, {
+  const url = new URL(`${requireApiBase()}/v1/admin/claims/${encodeURIComponent(id)}/files`);
+  if (kind) url.searchParams.set('kind', kind);
+  const res = await fetch(url.toString(), {
     method: 'POST',
     headers: { ...authHdr(token) },
     body: fd,
@@ -602,6 +611,15 @@ export async function createEmployee(token, body) {
   return data.employee;
 }
 
+export async function getEmployee(token, id) {
+  const res = await fetch(`${requireApiBase()}/v1/admin/employees/${encodeURIComponent(id)}`, {
+    headers: { Accept: 'application/json', ...authHdr(token) },
+  });
+  const data = await parseJson(res);
+  await handleHrResponse(res, data);
+  return data.employee;
+}
+
 export async function updateEmployee(token, id, body) {
   const res = await fetch(`${requireApiBase()}/v1/admin/employees/${encodeURIComponent(id)}`, {
     method: 'PATCH',
@@ -626,6 +644,9 @@ export async function deactivateEmployee(token, id) {
 export async function listSalaries(token, query = {}) {
   const qp = new URLSearchParams();
   if (query.employeeId) qp.set('employeeId', query.employeeId);
+  if (query.weekStart) qp.set('weekStart', query.weekStart);
+  if (query.from) qp.set('from', query.from);
+  if (query.to) qp.set('to', query.to);
   if (query.year) qp.set('year', String(query.year));
   const qs = qp.toString();
   const res = await fetch(`${requireApiBase()}/v1/admin/salaries${qs ? `?${qs}` : ''}`, {
@@ -655,6 +676,48 @@ export async function deleteSalary(token, id) {
   if (res.status === 204) return;
   const data = await parseJson(res);
   await handleHrResponse(res, data);
+}
+
+export async function fetchPayrollSummary(token, query = {}) {
+  const qp = new URLSearchParams();
+  if (query.from) qp.set('from', query.from);
+  if (query.to) qp.set('to', query.to);
+  if (query.employeeId) qp.set('employeeId', query.employeeId);
+  const qs = qp.toString();
+  const res = await fetch(`${requireApiBase()}/v1/admin/payroll/summary${qs ? `?${qs}` : ''}`, {
+    headers: { Accept: 'application/json', ...authHdr(token) },
+  });
+  const data = await parseJson(res);
+  await handleHrResponse(res, data);
+  return {
+    summary: data.summary || [],
+    totals: data.totals || {},
+    byWeek: data.byWeek || [],
+  };
+}
+
+async function downloadHrStatement(token, path, query, fallbackFilename) {
+  const qp = new URLSearchParams({ format: 'csv' });
+  if (query.from) qp.set('from', query.from);
+  if (query.to) qp.set('to', query.to);
+  if (query.employeeId) qp.set('employeeId', query.employeeId);
+  if (query.q) qp.set('q', query.q);
+  const res = await fetch(`${requireApiBase()}/v1/admin/${path}?${qp}`, {
+    headers: { Accept: 'text/csv', ...authHdr(token) },
+  });
+  if (!res.ok) {
+    const data = await parseJson(res);
+    await handleHrResponse(res, data);
+  }
+  await downloadBlobResponse(res, fallbackFilename);
+}
+
+export async function downloadAttendanceStatement(token, query = {}) {
+  return downloadHrStatement(token, 'statements/attendance', query, 'attendance-statement.csv');
+}
+
+export async function downloadPayrollStatement(token, query = {}) {
+  return downloadHrStatement(token, 'statements/payroll', query, 'payroll-statement.csv');
 }
 
 export async function listAttendance(token, query = {}) {

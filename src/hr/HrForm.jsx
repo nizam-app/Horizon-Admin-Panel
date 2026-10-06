@@ -51,11 +51,11 @@ export function HrMonthSelect({ value, onChange, className = '' }) {
   );
 }
 
-export function HrMoneyInput({ currency = 'NZD', className = '', inputClassName = '', ...props }) {
+export function HrMoneyInput({ className = '', inputClassName = '', ...props }) {
   return (
     <div className={`flex h-10 overflow-hidden rounded-xl border border-zinc-200/90 bg-white shadow-sm focus-within:border-indigo-400 focus-within:ring-2 focus-within:ring-indigo-500/15 ${className}`}>
-      <span className="flex shrink-0 items-center border-r border-zinc-200/90 bg-zinc-50 px-3 text-2xs font-bold uppercase tracking-wide text-zinc-500">
-        {currency}
+      <span className="flex shrink-0 items-center border-r border-zinc-200/90 bg-zinc-50 px-3 text-sm font-semibold text-zinc-600">
+        $
       </span>
       <input
         type="number"

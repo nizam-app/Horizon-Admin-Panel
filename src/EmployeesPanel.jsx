@@ -1,9 +1,23 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Users } from 'lucide-react';
+import { Eye, Pencil, UserX, Users } from 'lucide-react';
 import * as api from './api.js';
-import { HrDateInput, HrField, HrTextInput } from './hr/HrForm.jsx';
-import { HrPageHeader, HrSearchField, HrSectionTitle, hrCardClass, hrCardHeaderClass, hrPrimaryBtn } from './hr/HrUi.jsx';
+import { EmployeeProfileModal } from './hr/EmployeeProfileModal.jsx';
+import { HrDateInput, HrField, HrMoneyInput, HrSelect, HrTextInput } from './hr/HrForm.jsx';
+import { labelClass } from './hrPanelUtils.js';
+import { formatMoneyPerHour } from './hr/money.js';
+import {
+  HrPageHeader,
+  HrSearchField,
+  HrSectionTitle,
+  hrCardClass,
+  hrCardHeaderClass,
+  hrPrimaryBtn,
+} from './hr/HrUi.jsx';
 import { useHrLoadError } from './hrPanelUtils.js';
+import { confirmDialog } from './swal.js';
+
+const actionBtn =
+  'inline-flex h-8 items-center justify-center gap-1 rounded-lg border px-2.5 text-2xs font-semibold shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/60';
 
 const emptyForm = {
   employeeNumber: '',
@@ -13,6 +27,7 @@ const emptyForm = {
   department: '',
   jobTitle: '',
   hireDate: '',
+  hourlyRate: '',
   status: 'active',
 };
 
@@ -21,27 +36,51 @@ export function EmployeesPanel({ token, onAuthError }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
   const [form, setForm] = useState(emptyForm);
   const [saving, setSaving] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileMode, setProfileMode] = useState('view');
+  const [profileEmployeeId, setProfileEmployeeId] = useState(null);
 
   const load = useCallback(async () => {
     if (!token) return;
     setLoading(true);
     setError('');
     try {
-      const out = await api.listEmployees(token, { q: search.trim() || undefined });
+      const out = await api.listEmployees(token, {
+        q: search.trim() || undefined,
+        status: statusFilter === 'all' ? undefined : statusFilter,
+      });
       setEmployees(out.employees);
     } catch (e) {
       setError(useHrLoadError(e, onAuthError));
     } finally {
       setLoading(false);
     }
-  }, [token, search, onAuthError]);
+  }, [token, search, statusFilter, onAuthError]);
 
   useEffect(() => {
     const t = window.setTimeout(load, search ? 280 : 0);
     return () => window.clearTimeout(t);
   }, [load, search]);
+
+  const openView = (id) => {
+    setProfileEmployeeId(id);
+    setProfileMode('view');
+    setProfileOpen(true);
+  };
+
+  const openEdit = (id) => {
+    setProfileEmployeeId(id);
+    setProfileMode('edit');
+    setProfileOpen(true);
+  };
+
+  const closeProfile = () => {
+    setProfileOpen(false);
+    setProfileEmployeeId(null);
+  };
 
   const onSubmit = async (e) => {
     e.preventDefault();
@@ -52,6 +91,8 @@ export function EmployeesPanel({ token, onAuthError }) {
       await api.createEmployee(token, {
         ...form,
         hireDate: form.hireDate || null,
+        hourlyRate: Number(form.hourlyRate),
+        payCurrency: 'AUD',
       });
       setForm(emptyForm);
       await load();
@@ -63,7 +104,7 @@ export function EmployeesPanel({ token, onAuthError }) {
   };
 
   const deactivate = async (id) => {
-    if (!token || !window.confirm('Mark this employee as inactive?')) return;
+    if (!token || !(await confirmDialog('They will no longer appear in active employee lists.', 'Deactivate employee?'))) return;
     try {
       await api.deactivateEmployee(token, id);
       await load();
@@ -73,11 +114,11 @@ export function EmployeesPanel({ token, onAuthError }) {
   };
 
   return (
-    <div className="mx-auto max-w-6xl space-y-5 pb-8">
+    <div className="space-y-4">
       <HrPageHeader
         icon={Users}
         title="Employees"
-        description="Manage workforce records for attendance and payroll."
+        description="Manage workforce records for attendance and payroll. Changing hourly rate only affects new attendance; past days and payments stay the same."
       />
       {error ? (
         <div className="rounded-xl border border-rose-200/90 bg-rose-50 px-4 py-3 text-sm text-rose-900 shadow-sm">{error}</div>
@@ -132,6 +173,14 @@ export function EmployeesPanel({ token, onAuthError }) {
             <HrField label="Hire date">
               <HrDateInput value={form.hireDate} onChange={(ev) => setForm((f) => ({ ...f, hireDate: ev.target.value }))} />
             </HrField>
+            <HrField label="Hourly rate">
+              <HrMoneyInput
+                value={form.hourlyRate}
+                onChange={(ev) => setForm((f) => ({ ...f, hourlyRate: ev.target.value }))}
+                placeholder="0.00"
+                required
+              />
+            </HrField>
           </div>
           <div className="mt-5 border-t border-zinc-100 pt-4">
             <button type="submit" disabled={saving} className={hrPrimaryBtn}>
@@ -141,7 +190,7 @@ export function EmployeesPanel({ token, onAuthError }) {
         </div>
       </form>
       <div className={hrCardClass}>
-        <div className="flex flex-wrap items-center gap-3 border-b border-zinc-100/90 bg-zinc-50/40 px-4 py-3 sm:px-5">
+        <div className="flex flex-wrap items-end gap-3 border-b border-zinc-100/90 bg-zinc-50/40 px-4 py-3 sm:px-5">
           <div className="min-w-[14rem] max-w-md flex-1">
             <HrSearchField
               value={search}
@@ -149,7 +198,23 @@ export function EmployeesPanel({ token, onAuthError }) {
               placeholder="Search name, #, email…"
             />
           </div>
-          <span className="text-2xs font-medium text-zinc-500">{loading ? 'Loading…' : `${employees.length} record(s)`}</span>
+          <div className="w-full min-w-[10rem] sm:w-auto">
+            <span className={labelClass}>Status</span>
+            <div className="mt-1.5">
+              <HrSelect
+                value={statusFilter}
+                onChange={(ev) => setStatusFilter(ev.target.value)}
+                aria-label="Filter by status"
+              >
+                <option value="all">All statuses</option>
+                <option value="active">Active only</option>
+                <option value="inactive">Inactive only</option>
+              </HrSelect>
+            </div>
+          </div>
+          <span className="pb-2 text-2xs font-medium text-zinc-500 sm:pb-2.5">
+            {loading ? 'Loading…' : `${employees.length} record(s)`}
+          </span>
         </div>
         <div className="overflow-x-auto">
           <table className="min-w-full text-left text-sm">
@@ -158,8 +223,10 @@ export function EmployeesPanel({ token, onAuthError }) {
                 <th className="px-4 py-2.5 sm:px-5">#</th>
                 <th className="px-4 py-2.5 sm:px-5">Name</th>
                 <th className="px-4 py-2.5 sm:px-5">Department</th>
+                <th className="px-4 py-2.5 sm:px-5">Job title</th>
+                <th className="px-4 py-2.5 sm:px-5">Rate</th>
                 <th className="px-4 py-2.5 sm:px-5">Status</th>
-                <th className="px-4 py-2.5 sm:px-5" />
+                <th className="px-4 py-2.5 text-right sm:px-5">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-100">
@@ -168,6 +235,8 @@ export function EmployeesPanel({ token, onAuthError }) {
                   <td className="px-4 py-3 font-mono text-xs text-zinc-700 sm:px-5">{emp.employeeNumber}</td>
                   <td className="px-4 py-3 font-medium text-zinc-900 sm:px-5">{emp.displayName}</td>
                   <td className="px-4 py-3 text-zinc-600 sm:px-5">{emp.department || '—'}</td>
+                  <td className="px-4 py-3 text-zinc-600 sm:px-5">{emp.jobTitle || '—'}</td>
+                  <td className="px-4 py-3 tabular-nums text-zinc-700 sm:px-5">{formatMoneyPerHour(emp.hourlyRate)}</td>
                   <td className="px-4 py-3 sm:px-5">
                     <span
                       className={`inline-flex rounded-full px-2 py-0.5 text-2xs font-semibold capitalize ${
@@ -180,24 +249,57 @@ export function EmployeesPanel({ token, onAuthError }) {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-right sm:px-5">
-                    {emp.status === 'active' ? (
-                      <button type="button" onClick={() => deactivate(emp.id)} className="text-2xs font-semibold text-rose-600 hover:text-rose-700">
-                        Deactivate
+                    <div className="flex flex-wrap items-center justify-end gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => openView(emp.id)}
+                        className={`${actionBtn} border-zinc-200/90 bg-white text-zinc-800 hover:border-zinc-300 hover:bg-zinc-50`}
+                      >
+                        <Eye className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+                        View
                       </button>
-                    ) : null}
+                      <button
+                        type="button"
+                        onClick={() => openEdit(emp.id)}
+                        className={`${actionBtn} border-indigo-200/90 bg-indigo-50 text-indigo-900 hover:bg-indigo-100`}
+                      >
+                        <Pencil className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+                        Edit
+                      </button>
+                      {emp.status === 'active' ? (
+                        <button
+                          type="button"
+                          onClick={() => deactivate(emp.id)}
+                          className={`${actionBtn} border-rose-200/90 bg-rose-50 text-rose-800 hover:bg-rose-100`}
+                        >
+                          <UserX className="h-3.5 w-3.5" strokeWidth={2} aria-hidden />
+                          Deactivate
+                        </button>
+                      ) : null}
+                    </div>
                   </td>
                 </tr>
               ))}
               {!loading && employees.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="px-4 py-12 text-center text-sm text-zinc-500 sm:px-5">No employees yet.</td>
+                  <td colSpan={7} className="px-4 py-12 text-center text-sm text-zinc-500 sm:px-5">No employees yet.</td>
                 </tr>
               ) : null}
             </tbody>
           </table>
         </div>
       </div>
+
+      <EmployeeProfileModal
+        open={profileOpen}
+        mode={profileMode}
+        employeeId={profileEmployeeId}
+        token={token}
+        onClose={closeProfile}
+        onSaved={() => void load()}
+        onAuthError={onAuthError}
+        onSwitchToEdit={() => setProfileMode('edit')}
+      />
     </div>
   );
 }
-

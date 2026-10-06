@@ -9,6 +9,7 @@ import {
 } from './memberSubmissionUtils.js';
 import { MemberSubmissionEditPanel } from './MemberSubmissionEditPanel.jsx';
 import * as api from './api.js';
+import { confirmDialog } from './swal.js';
 
 function resolveFileHref(urlOrDataUrl) {
   const value = String(urlOrDataUrl || '').trim();
@@ -433,8 +434,14 @@ export function MemberSubmissionPanel({ claimItem, readOnly = true, onSaveSectio
     setEditDirty(Boolean(dirty));
     onDirtyChange?.(Boolean(dirty));
   }, [onDirtyChange]);
-  const leaveEditMode = () => {
-    if (editDirty && !window.confirm('You have unsaved member submission changes. Discard them and return to review?')) {
+  const leaveEditMode = async () => {
+    if (
+      editDirty &&
+      !(await confirmDialog(
+        'You have unsaved member submission changes. Discard them and return to review?',
+        'Discard changes?',
+      ))
+    ) {
       return;
     }
     updateDirty(false);
@@ -458,7 +465,7 @@ export function MemberSubmissionPanel({ claimItem, readOnly = true, onSaveSectio
             ) : null}
           <button
             type="button"
-            onClick={leaveEditMode}
+            onClick={() => void leaveEditMode()}
             className="inline-flex h-9 items-center rounded-lg border border-zinc-200 bg-white px-3 text-2xs font-semibold text-zinc-800 shadow-sm transition hover:bg-zinc-50"
           >
             Back to review

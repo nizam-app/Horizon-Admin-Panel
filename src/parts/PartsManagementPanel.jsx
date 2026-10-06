@@ -91,7 +91,7 @@ function PartsPaginationBar({ page, total, onPageChange }) {
   const from = (page - 1) * PAGE_SIZE + 1;
   const to = Math.min(page * PAGE_SIZE, total);
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 bg-white px-4 py-2.5 text-2xs text-zinc-600">
+    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 bg-white px-4 py-2.5 text-2xs text-zinc-600">
       <span>
         Showing <span className="font-medium text-zinc-800">{from}–{to}</span> of{' '}
         <span className="font-medium text-zinc-800">{total}</span>
@@ -345,6 +345,20 @@ export function PartsManagementPanel({ token, sessionRole, onAuthError, onOpenCl
       await api.deletePartLine(token, editRow.claimId, editRow.partId);
       setEditOpen(false);
       setEditRow(null);
+      await load();
+    } catch (e) {
+      await alertError(e?.message || 'Could not delete part');
+    } finally {
+      setEditBusy(false);
+    }
+  };
+
+  const deleteRowInline = async (row) => {
+    if (!superCrud) return;
+    if (!(await confirmDialog('Delete this part line from the claim?', 'Delete part line?'))) return;
+    setEditBusy(true);
+    try {
+      await api.deletePartLine(token, row.claimId, row.partId);
       await load();
     } catch (e) {
       await alertError(e?.message || 'Could not delete part');
@@ -640,8 +654,6 @@ export function PartsManagementPanel({ token, sessionRole, onAuthError, onOpenCl
           </div>
         </HrFilterBar>
 
-        <PartsPaginationBar page={page} total={total} onPageChange={setPage} />
-
         <div className="overflow-x-auto">
           <table className="min-w-full text-left text-sm">
             <thead className="border-b border-zinc-100 bg-zinc-50/80 text-2xs uppercase tracking-wider text-zinc-500">
@@ -705,6 +717,17 @@ export function PartsManagementPanel({ token, sessionRole, onAuthError, onOpenCl
                           >
                             <Pencil className="h-3.5 w-3.5" strokeWidth={2} />
                             Edit
+                          </button>
+                        ) : null}
+                        {superCrud ? (
+                          <button
+                            type="button"
+                            disabled={editBusy}
+                            onClick={() => deleteRowInline(row)}
+                            className={`${tableActionBtn} border-rose-200/90 bg-rose-50 text-rose-900 hover:bg-rose-100`}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" strokeWidth={2} />
+                            Delete
                           </button>
                         ) : null}
                       </div>

@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
   AlertTriangle,
+  BadgeCheck,
   Banknote,
+  Car,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -78,6 +80,7 @@ import {
   resolveDamageDiagramFromDamage,
   submissionSource,
 } from './memberSubmissionUtils.js';
+import { alertError, alertWarning, confirmDialog, confirmDelete } from './swal.js';
 
 /** Payment status is only `pending` or `completed`; maps legacy stored values. */
 function normalizePaymentStatus(raw) {
@@ -97,7 +100,7 @@ const detailFields = [
   { label: 'Other Parties', getter: (data) => (data.otherParties?.length ?? 0).toString() },
 ];
 
-const CLAIM_STATUSES = ['Pending Review', 'Approved', 'Rejected', 'Litigation', 'Recovery'];
+const CLAIM_STATUSES = ['Pending Review', 'Approved', 'Rejected', 'Litigation', 'Recovery', 'Completed', 'Rental'];
 const STATUS_OPTIONS = ['All', ...CLAIM_STATUSES];
 
 function statusFilterLabel(option) {
@@ -123,6 +126,7 @@ const MODAL_TABS = [
   { id: 'documents', label: 'Checklist' },
   { id: 'quotes', label: 'Insurance quote' },
   { id: 'parts', label: 'Parts' },
+  { id: 'claimFormPdf', label: 'Claim form PDF' },
 ];
 
 function newQuoteLine() {
@@ -130,7 +134,7 @@ function newQuoteLine() {
     typeof crypto !== 'undefined' && crypto.randomUUID
       ? crypto.randomUUID()
       : `quote-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  return { id, supplier: '', amount: 0, reference: '', notes: '' };
+  return { id, supplier: '', amount: 0, reference: '', notes: '', fileId: null, fileName: '', fileUrl: '' };
 }
 
 function parseMoneyInput(raw) {
@@ -254,6 +258,30 @@ function formatFileSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function caseFilePdfDownloadName(name) {
+  const base = String(name || 'document').trim() || 'document';
+  return /\.pdf$/i.test(base) ? base : `${base}.pdf`;
+}
+
+function CasePdfFileActions({ file }) {
+  const href = resolveClaimFileHref(file?.dataUrl || file?.url);
+  if (!href) return null;
+  const downloadName = caseFilePdfDownloadName(file?.name);
+  const linkClass =
+    'rounded-lg border border-zinc-200 px-2 py-1 text-2xs font-semibold text-zinc-700 hover:bg-zinc-50';
+  return (
+    <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+      <a href={href} target="_blank" rel="noreferrer" className={linkClass}>
+        Open
+      </a>
+      <a href={href} download={downloadName} className={`inline-flex items-center gap-1 ${linkClass}`}>
+        <Download className="h-3 w-3" strokeWidth={2} aria-hidden />
+        Download
+      </a>
+    </div>
+  );
 }
 
 function readFileAsDataUrl(file) {
@@ -504,6 +532,9 @@ function quoteOptionsSnapshot(options) {
       amount: Number(q.amount) || 0,
       reference: String(q.reference ?? ''),
       notes: String(q.notes ?? ''),
+      fileId: q.fileId == null || q.fileId === '' ? null : String(q.fileId),
+      fileName: String(q.fileName ?? ''),
+      fileUrl: String(q.fileUrl ?? ''),
     }))
     .sort((a, b) => a.id.localeCompare(b.id));
 }
@@ -1273,12 +1304,14 @@ function App() {
   const metrics = useMemo(() => {
     const t = statusTotals;
     return {
-      total: (t['Pending Review'] ?? 0) + (t['Approved'] ?? 0) + (t['Rejected'] ?? 0) + (t['Litigation'] ?? 0) + (t['Recovery'] ?? 0),
+      total: (t['Pending Review'] ?? 0) + (t['Approved'] ?? 0) + (t['Rejected'] ?? 0) + (t['Litigation'] ?? 0) + (t['Recovery'] ?? 0) + (t['Completed'] ?? 0) + (t['Rental'] ?? 0),
       pending: t['Pending Review'] ?? 0,
       approved: t['Approved'] ?? 0,
       rejected: t['Rejected'] ?? 0,
       litigation: t['Litigation'] ?? 0,
       recovery: t['Recovery'] ?? 0,
+      completed: t['Completed'] ?? 0,
+      rental: t['Rental'] ?? 0,
     };
   }, [statusTotals]);
 
@@ -1302,7 +1335,7 @@ function App() {
   const updateClaimStatus = async (id, status) => {
     const claimId = claimMongoId({ id, _id: id });
     if (!claimId) {
-      window.alert('Invalid claim id — refresh the page, then open this claim again from the queue.');
+      void alertWarning('Refresh the page, then open this claim again from the queue.', 'Invalid claim id');
       return;
     }
     const sameClaim = (item) => claimMongoId(item) === claimId;
@@ -1318,8 +1351,8 @@ function App() {
       console.error(e);
       setClaims(previousClaims);
       setSelectedClaim(previousSelected);
-      window.alert(
-        `Could not update status on server: ${e.message || String(e)}. If you use Litigation or Recovery, redeploy the backend on Render (or run the latest API locally).`,
+      void alertError(
+        `Could not update status on server: ${e.message || String(e)}. If you use Litigation, Recovery, Completed, or Rental, ensure the backend is on the latest version.`,
       );
     }
   };
@@ -1386,7 +1419,7 @@ function App() {
       setSelectedClaim(api.claimFromApi(full));
     } catch (e) {
       if (e instanceof api.ApiAuthError) logout();
-      else window.alert(e?.message || 'Could not open claim');
+      else void alertError(e?.message || 'Could not open claim');
     }
   };
 
@@ -1395,7 +1428,7 @@ function App() {
     setClaimModalInitialTab('overview');
     const rowId = api.normalizeClaimId(item?.id ?? item?._id);
     if (!rowId) {
-      window.alert('This claim has an invalid id in the list. Refresh the page or contact support.');
+      void alertWarning('Refresh the page or contact support.', 'Invalid claim id');
       return;
     }
     setSelectedClaim({ ...api.claimFromApi({ ...item, id: rowId }), _detailLoading: true });
@@ -1637,7 +1670,7 @@ function App() {
               </div>
             )}
             <section
-              className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7"
+              className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 2xl:grid-cols-9"
               aria-label="Claims portfolio statistics"
             >
               <MetricCard
@@ -1713,6 +1746,30 @@ function App() {
                 }}
               />
               <MetricCard
+                title="Completed"
+                value={metrics.completed}
+                caption={t ? `${shareOfTotal(metrics.completed, t)}% of total` : '—'}
+                icon={BadgeCheck}
+                tone="emerald"
+                active={statusFilter === 'Completed'}
+                onClick={() => {
+                  setStatusFilter('Completed');
+                  setCurrentPage(1);
+                }}
+              />
+              <MetricCard
+                title="Rental"
+                value={metrics.rental}
+                caption={t ? `${shareOfTotal(metrics.rental, t)}% of total` : '—'}
+                icon={Car}
+                tone="indigo"
+                active={statusFilter === 'Rental'}
+                onClick={() => {
+                  setStatusFilter('Rental');
+                  setCurrentPage(1);
+                }}
+              />
+              <MetricCard
                 title="Filtered"
                 value={totalClaims}
                 caption={
@@ -1728,66 +1785,73 @@ function App() {
               />
             </section>
 
-            <section>
-              <div className="flex min-w-0 flex-col overflow-hidden rounded-2xl border border-zinc-200/90 bg-white shadow-card">
+            <section className="min-w-0">
+              <div className="overflow-hidden rounded-2xl border border-zinc-200/90 bg-white shadow-card">
                 <div className="border-b border-zinc-100 px-3 py-3 sm:px-5">
-                  <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div className="min-w-0">
                       <h1 className="font-display text-base font-semibold tracking-tight text-zinc-950">Claims queue</h1>
-                      <p className="mt-0.5 text-2xs text-zinc-500">Search, filter, and open claims from the table below.</p>
+                      <p className="mt-0.5 text-2xs text-zinc-500">
+                        Use the summary cards above for status, or search below. Click a row to open the case file.
+                      </p>
                     </div>
-                    <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center xl:w-auto xl:max-w-3xl">
-                      {!claimsReadOnly ? (
-                        <button
-                          type="button"
-                          onClick={() => setBuyerPdfModalOpen(true)}
-                          className="inline-flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-3 text-[13px] font-semibold text-white shadow-sm transition hover:bg-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-1"
-                        >
-                          <Plus className="h-4 w-4" strokeWidth={2} />
-                          New claim
-                        </button>
-                      ) : null}
-                      <label className="group relative min-w-0 flex-1 sm:max-w-xs lg:max-w-[280px]">
-                        <span className="sr-only">Search claims</span>
-                        <Search
-                          className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400 transition group-focus-within:text-indigo-600"
-                          strokeWidth={2}
-                        />
-                        <input
-                          type="search"
-                          value={searchTerm}
-                          onChange={(event) => { setSearchTerm(event.target.value); setCurrentPage(1); }}
-                          placeholder="Search plate, customer, driver, date…"
-                          className="h-10 w-full rounded-xl border border-zinc-200/90 bg-zinc-50/80 pl-10 pr-3 text-[13px] text-zinc-900 shadow-inner outline-none transition placeholder:text-zinc-400 focus:border-indigo-400/80 focus:bg-white focus:ring-2 focus:ring-indigo-500/20"
-                        />
-                      </label>
-                      <div
-                        className="flex max-w-full flex-wrap gap-1 rounded-xl border border-zinc-200/90 bg-zinc-100/90 p-0.5 shadow-inner"
-                        role="group"
+                    {(statusFilter !== 'All' || searchTerm.trim()) ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setStatusFilter('All');
+                          setSearchTerm('');
+                          setCurrentPage(1);
+                        }}
+                        className="h-9 shrink-0 self-start rounded-lg border border-zinc-200 bg-white px-3 text-2xs font-semibold text-zinc-700 shadow-sm hover:bg-zinc-50 sm:self-center"
+                      >
+                        Clear filters
+                      </button>
+                    ) : null}
+                  </div>
+                  <div className="mt-3 flex flex-col gap-2 md:flex-row md:items-center">
+                    {!claimsReadOnly ? (
+                      <button
+                        type="button"
+                        onClick={() => setBuyerPdfModalOpen(true)}
+                        className="inline-flex h-10 w-full shrink-0 items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-3 text-[13px] font-semibold text-white shadow-sm transition hover:bg-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-1 md:w-auto"
+                      >
+                        <Plus className="h-4 w-4" strokeWidth={2} />
+                        New claim
+                      </button>
+                    ) : null}
+                    <label className="group relative min-w-0 w-full md:flex-1">
+                      <span className="sr-only">Search claims</span>
+                      <Search
+                        className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400 transition group-focus-within:text-indigo-600"
+                        strokeWidth={2}
+                      />
+                      <input
+                        type="search"
+                        value={searchTerm}
+                        onChange={(event) => { setSearchTerm(event.target.value); setCurrentPage(1); }}
+                        placeholder="Search plate, customer, driver, date…"
+                        className="h-10 w-full rounded-xl border border-zinc-200/90 bg-zinc-50/80 pl-10 pr-3 text-[13px] text-zinc-900 shadow-inner outline-none transition placeholder:text-zinc-400 focus:border-indigo-400/80 focus:bg-white focus:ring-2 focus:ring-indigo-500/20"
+                      />
+                    </label>
+                    <label className="flex w-full shrink-0 flex-col gap-1 md:w-48">
+                      <span className="sr-only">Filter by status</span>
+                      <select
+                        value={statusFilter}
+                        onChange={(e) => {
+                          setStatusFilter(e.target.value);
+                          setCurrentPage(1);
+                        }}
+                        className="h-10 w-full rounded-xl border border-zinc-200/90 bg-zinc-50/80 px-2.5 text-[13px] font-medium text-zinc-900 shadow-inner outline-none focus:border-indigo-400/80 focus:bg-white focus:ring-2 focus:ring-indigo-500/20"
                         aria-label="Filter by status"
                       >
                         {STATUS_OPTIONS.map((option) => (
-                          <button
-                            key={option}
-                            type="button"
-                            onClick={() => { setStatusFilter(option); setCurrentPage(1); }}
-                            className={`whitespace-nowrap rounded-lg px-2.5 py-2 text-2xs font-semibold uppercase tracking-wide transition ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-1 sm:px-3 ${
-                              statusFilter === option
-                                ? 'bg-white text-zinc-900 shadow-lift ring-1 ring-zinc-200/80'
-                                : 'text-zinc-600 hover:text-zinc-900'
-                            }`}
-                          >
+                          <option key={option} value={option}>
                             {statusFilterLabel(option)}
-                          </button>
+                          </option>
                         ))}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="hidden">
-                    <QueueStat label="Awaiting action" value={metrics.pending} />
-                    <QueueStat label="In view" value={filteredClaims.length} />
-                    <QueueStat label="High priority" value={claims.filter((item) => item.priority === 'High').length} />
+                      </select>
+                    </label>
                   </div>
                 </div>
 
@@ -1957,10 +2021,9 @@ function App() {
                     </tbody>
                   </table>
                 </div>
-              </div>
               {/* Pagination controls */}
               {totalPages > 1 && (
-                <div className="mt-4 flex flex-wrap items-center justify-between gap-3 px-1">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-100 px-3 py-3 sm:px-5">
                   <p className="text-2xs text-zinc-500">
                     Showing{' '}
                     <span className="font-semibold text-zinc-800">
@@ -2016,6 +2079,7 @@ function App() {
                   </div>
                 </div>
               )}
+              </div>
             </section>
               </>
             )}
@@ -2035,6 +2099,8 @@ function App() {
           onReject={() => updateClaimStatus(claimMongoId(selectedClaim), 'Rejected')}
           onLitigation={() => updateClaimStatus(claimMongoId(selectedClaim), 'Litigation')}
           onRecovery={() => updateClaimStatus(claimMongoId(selectedClaim), 'Recovery')}
+          onCompleted={() => updateClaimStatus(claimMongoId(selectedClaim), 'Completed')}
+          onRental={() => updateClaimStatus(claimMongoId(selectedClaim), 'Rental')}
           onReopen={() => updateClaimStatus(claimMongoId(selectedClaim), 'Pending Review')}
           onExport={() => exportClaimToPdf(selectedClaim)}
           onPatchClaim={patchClaim}
@@ -2169,7 +2235,11 @@ function StatusBadge({ status }) {
           ? 'border-violet-200 bg-violet-50 text-violet-900'
           : status === 'Recovery'
             ? 'border-sky-200 bg-sky-50 text-sky-900'
-            : 'border-amber-200 bg-amber-50 text-amber-950';
+            : status === 'Completed'
+              ? 'border-teal-200 bg-teal-50 text-teal-900'
+              : status === 'Rental'
+                ? 'border-indigo-200 bg-indigo-50 text-indigo-900'
+                : 'border-amber-200 bg-amber-50 text-amber-950';
 
   return (
     <span
@@ -2524,6 +2594,8 @@ function ClaimModal({
   onReject,
   onLitigation,
   onRecovery,
+  onCompleted,
+  onRental,
   onReopen,
   onExport,
   onPatchClaim,
@@ -2550,6 +2622,7 @@ function ClaimModal({
   const [partsSave, setPartsSave] = useState('idle');
   const [partsSaveKind, setPartsSaveKind] = useState(null);
   const [partInvoiceBusyId, setPartInvoiceBusyId] = useState(null);
+  const [quotePdfBusyId, setQuotePdfBusyId] = useState(null);
   const [partNextInvoiceNumber, setPartNextInvoiceNumber] = useState({});
   const [quoteOptionsDraft, setQuoteOptionsDraft] = useState(() => cloneQuoteOptions(claimItem.quoteOptions));
   const [primaryQuoteIdDraft, setPrimaryQuoteIdDraft] = useState(claimItem.primaryQuoteId ?? null);
@@ -2566,21 +2639,26 @@ function ClaimModal({
   const canFullPartsCrud = canManagePartsCrud(role);
   const partsFieldsReadOnly = claimsReadOnly || !canFullPartsCrud;
   const fileInputRef = useRef(null);
+  const additionalFileInputRef = useRef(null);
+  const rentalFileInputRef = useRef(null);
   const tabRailRef = useRef(null);
 
   const openDeleteDialog = () => onRequestDelete?.();
-  const confirmLeaveMemberEdit = () => {
+  const confirmLeaveMemberEdit = async () => {
     if (!memberSubmissionDirty) return true;
-    return window.confirm('You have unsaved member submission changes. Discard them and leave this edit session?');
+    return await confirmDialog(
+      'You have unsaved member submission changes. Discard them and leave this edit session?',
+      'Discard changes?',
+    );
   };
-  const navigateTab = (nextTab) => {
+  const navigateTab = async (nextTab) => {
     if (nextTab === tab) return;
-    if (!confirmLeaveMemberEdit()) return;
+    if (!(await confirmLeaveMemberEdit())) return;
     setMemberSubmissionDirty(false);
     setTab(nextTab);
   };
-  const closeModal = () => {
-    if (!confirmLeaveMemberEdit()) return;
+  const closeModal = async () => {
+    if (!(await confirmLeaveMemberEdit())) return;
     onClose();
   };
 
@@ -2639,7 +2717,7 @@ function ClaimModal({
     if (claimsReadOnly || !onUpdatePrices) return;
     const amount = parseMoneyInput(priceDraft.quote);
     if (amount == null) {
-      window.alert('Enter a quote price before saving.');
+      void alertWarning('Enter a quote price before saving.');
       return;
     }
     const wasUpdate = quotePrice != null;
@@ -2652,7 +2730,7 @@ function ClaimModal({
       setQuoteSave('saved');
     } catch (e) {
       setQuoteSave('error');
-      window.alert(e?.message ? String(e.message) : 'Could not save quote price.');
+      void alertError(e?.message ? String(e.message) : 'Could not save quote price.');
     }
   };
 
@@ -2660,7 +2738,7 @@ function ClaimModal({
     if (claimsReadOnly || !onUpdatePrices) return;
     const amount = parseMoneyInput(priceDraft.insurance);
     if (amount == null) {
-      window.alert('Enter an insurance company price before saving.');
+      void alertWarning('Enter an insurance company price before saving.');
       return;
     }
     const wasUpdate = insuranceApprovedPrice != null;
@@ -2673,7 +2751,7 @@ function ClaimModal({
       setInsuranceSave('saved');
     } catch (e) {
       setInsuranceSave('error');
-      window.alert(e?.message ? String(e.message) : 'Could not save insurance company price.');
+      void alertError(e?.message ? String(e.message) : 'Could not save insurance company price.');
     }
   };
 
@@ -2689,7 +2767,7 @@ function ClaimModal({
       setAdminNoteSave('saved');
     } catch (e) {
       setAdminNoteSave('error');
-      window.alert(e?.message ? String(e.message) : 'Could not save admin note.');
+      void alertError(e?.message ? String(e.message) : 'Could not save admin note.');
     }
   };
 
@@ -2714,6 +2792,38 @@ function ClaimModal({
   const insuranceApprovedPrice = claimItem.insuranceApprovedPrice ?? null;
   const claimStatus = claimItem.status ?? 'Pending Review';
   const isPendingReview = claimStatus === 'Pending Review';
+  const isAdminBuyerPdf = claimItem.intakeSource === 'admin-buyer-pdf';
+  const isRentalStatus = claimStatus === 'Rental';
+
+  // Partition caseFiles by kind (exclude files linked to part invoices or repair quotes).
+  const invoiceLinkedFileIds = new Set(
+    partsDraft.flatMap((p) => (p.invoices ?? []).map((inv) => inv.fileId)).filter(Boolean),
+  );
+  const repairQuoteLinkedFileIds = new Set(
+    quoteOptionsDraft.map((q) => q.fileId).filter(Boolean),
+  );
+  const linkedCaseFileIds = new Set([...invoiceLinkedFileIds, ...repairQuoteLinkedFileIds]);
+  const nonInvoiceFiles = caseFiles.filter((f) => !linkedCaseFileIds.has(f.id));
+  const hasExplicitIntake = nonInvoiceFiles.some((f) => f.kind === 'intake');
+  // Legacy: admin-buyer-pdf claims created before `kind` was stored — treat first file as intake.
+  const legacyFirstId =
+    isAdminBuyerPdf && !hasExplicitIntake && nonInvoiceFiles.length > 0
+      ? nonInvoiceFiles[0].id
+      : null;
+  const intakeFiles = nonInvoiceFiles.filter(
+    (f) => f.kind === 'intake' || f.id === legacyFirstId,
+  );
+  // For buyer-pdf claims: 'general'/untagged files after the legacy first are shown as additional.
+  const additionalFiles = nonInvoiceFiles.filter((f) => {
+    if (f.kind === 'additional') return true;
+    if (isAdminBuyerPdf && !['intake', 'rental'].includes(f.kind) && f.id !== legacyFirstId) return true;
+    return false;
+  });
+  const rentalFiles = nonInvoiceFiles.filter((f) => f.kind === 'rental');
+  // General files: non-buyer-pdf claims only (member claims), or tagged 'general' on member claims.
+  const generalFiles = nonInvoiceFiles.filter(
+    (f) => !isAdminBuyerPdf && !['intake', 'additional', 'rental'].includes(f.kind),
+  );
   const memberRepairQuoteRef =
     claimItem.payload?.repairQuoteRef ||
     claimItem.payload?.checklist?.repairQuoteRef ||
@@ -2833,17 +2943,91 @@ function ClaimModal({
     setPartsSaveKind(null);
   };
 
+  const handleRepairQuotePdfUpload = async (quoteId, ev) => {
+    const file = ev.target.files?.[0];
+    ev.target.value = '';
+    if (!file || claimsReadOnly || !authToken) return;
+    if (file.type !== 'application/pdf' && !/\.pdf$/i.test(file.name)) {
+      void alertWarning('Please upload a PDF file.');
+      return;
+    }
+    const claimId = claimMongoId(claimItem);
+    if (!claimId) {
+      void alertWarning('Close and reopen this case.', 'Invalid claim id');
+      return;
+    }
+    setQuotePdfBusyId(quoteId);
+    try {
+      const nextCaseFiles = await api.uploadClaimPdf(authToken, claimId, file, { kind: 'general' });
+      const uploaded = nextCaseFiles[nextCaseFiles.length - 1];
+      if (!uploaded) throw new Error('Upload failed');
+      const prevQuote = quoteOptionsDraft.find((q) => q.id === quoteId);
+      setQuoteOptionsDraft((rows) =>
+        rows.map((q) =>
+          q.id === quoteId
+            ? {
+                ...q,
+                fileId: uploaded.id,
+                fileName: uploaded.name,
+                fileUrl: uploaded.url,
+              }
+            : q,
+        ),
+      );
+      let caseFilesAfter = nextCaseFiles;
+      if (prevQuote?.fileId && prevQuote.fileId !== uploaded.id) {
+        try {
+          caseFilesAfter = await api.deleteClaimPdf(authToken, claimId, prevQuote.fileId);
+        } catch {
+          /* keep new upload */
+        }
+      }
+      patch((prev) => ({ ...prev, caseFiles: caseFilesAfter }));
+      if (repairQuotesSave === 'saved') setRepairQuotesSave('idle');
+      setRepairQuotesSaveKind(null);
+    } catch (e) {
+      void alertError(e?.message ? String(e.message) : 'Could not upload quote PDF.');
+    } finally {
+      setQuotePdfBusyId(null);
+    }
+  };
+
+  const handleRemoveRepairQuotePdf = async (quoteId) => {
+    if (claimsReadOnly) return;
+    const quote = quoteOptionsDraft.find((q) => q.id === quoteId);
+    if (!quote?.fileId) return;
+    if (authToken) {
+      setQuotePdfBusyId(quoteId);
+      try {
+        const cf = await api.deleteClaimPdf(authToken, claimMongoId(claimItem), quote.fileId);
+        patch((prev) => ({ ...prev, caseFiles: cf }));
+      } catch (e) {
+        void alertError(e?.message ? String(e.message) : 'Could not remove PDF.');
+        setQuotePdfBusyId(null);
+        return;
+      }
+      setQuotePdfBusyId(null);
+    }
+    setQuoteOptionsDraft((rows) =>
+      rows.map((q) =>
+        q.id === quoteId ? { ...q, fileId: null, fileName: '', fileUrl: '' } : q,
+      ),
+    );
+    if (repairQuotesSave === 'saved') setRepairQuotesSave('idle');
+    setRepairQuotesSaveKind(null);
+  };
+
   const handlePartInvoiceUpload = async (partId, ev) => {
     const file = ev.target.files?.[0];
     ev.target.value = '';
     if (!file || claimsReadOnly || !authToken) return;
     if (file.type !== 'application/pdf' && !/\.pdf$/i.test(file.name)) {
-      window.alert('Please upload a PDF invoice.');
+      void alertWarning('Please upload a PDF invoice.');
       return;
     }
     const claimId = claimMongoId(claimItem);
     if (!claimId) {
-      window.alert('Invalid claim id — close and reopen this case.');
+      void alertWarning('Close and reopen this case.', 'Invalid claim id');
       return;
     }
     const invoiceNumber = String(partNextInvoiceNumber[partId] ?? '').trim();
@@ -2867,7 +3051,7 @@ function ClaimModal({
       if (partsSave === 'saved') setPartsSave('idle');
       setPartsSaveKind(null);
     } catch (e) {
-      window.alert(e?.message ? String(e.message) : 'Could not upload invoice.');
+      void alertError(e?.message ? String(e.message) : 'Could not upload invoice.');
     } finally {
       setPartInvoiceBusyId(null);
     }
@@ -2920,7 +3104,7 @@ function ClaimModal({
       setPartsSave('saved');
     } catch (e) {
       setPartsSave('error');
-      window.alert(e?.message ? String(e.message) : 'Could not save parts.');
+      void alertError(e?.message ? String(e.message) : 'Could not save parts.');
     }
   };
 
@@ -2942,7 +3126,7 @@ function ClaimModal({
       setRepairQuotesSave('saved');
     } catch (e) {
       setRepairQuotesSave('error');
-      window.alert(e?.message ? String(e.message) : 'Could not save repair quotes.');
+      void alertError(e?.message ? String(e.message) : 'Could not save repair quotes.');
     }
   };
 
@@ -2958,11 +3142,12 @@ function ClaimModal({
       setPaymentSave('saved');
     } catch (e) {
       setPaymentSave('error');
-      window.alert(e?.message ? String(e.message) : 'Could not save payment status.');
+      void alertError(e?.message ? String(e.message) : 'Could not save payment status.');
     }
   };
 
-  const handlePdfInput = async (ev) => {
+  /** Generic pdf upload handler — pass kind to tag the file on the server. */
+  const handlePdfInputWithKind = async (ev, kind = 'general') => {
     const picked = [...(ev.target.files || [])].filter((f) => f.type === 'application/pdf');
     ev.target.value = '';
     if (!picked.length || claimsReadOnly) return;
@@ -2974,7 +3159,7 @@ function ClaimModal({
       else ok.push(f);
     }
     if (skip.length) {
-      window.alert(`These files were skipped (limit ${formatFileSize(MAX_FALLBACK_BYTES)}): ${skip.join(', ')}`);
+      void alertWarning(`These files were skipped (limit ${formatFileSize(MAX_FALLBACK_BYTES)}): ${skip.join(', ')}`, 'Files skipped');
     }
     if (!ok.length) return;
     setPdfBusy(true);
@@ -2982,27 +3167,34 @@ function ClaimModal({
       if (authToken) {
         const claimId = api.normalizeClaimId(claimItem.id ?? claimItem._id);
         if (!claimId) {
-          window.alert('Invalid claim id — close this case and open it again from the queue.');
+          void alertWarning('Close this case and open it again from the queue.', 'Invalid claim id');
           return;
         }
         let nextList = [...(claimItem.caseFiles ?? [])];
         for (const f of ok) {
-          nextList = await api.uploadClaimPdf(authToken, claimId, f);
+          nextList = await api.uploadClaimPdf(authToken, claimId, f, { kind });
         }
         patch((prev) => ({ ...prev, caseFiles: nextList, id: claimId, _id: claimId }));
       } else {
-        const added = await Promise.all(ok.map((f) => fileToCaseFile(f)));
+        const added = await Promise.all(ok.map(async (f) => {
+          const base = await fileToCaseFile(f);
+          return { ...base, kind };
+        }));
         patch((prev) => ({
           ...prev,
           caseFiles: [...(prev.caseFiles ?? []), ...added],
         }));
       }
     } catch (e) {
-      window.alert(e?.message ? String(e.message) : 'Could not upload one or more PDFs.');
+      void alertError(e?.message ? String(e.message) : 'Could not upload one or more PDFs.');
     } finally {
       setPdfBusy(false);
     }
   };
+
+  const handlePdfInput = (ev) => handlePdfInputWithKind(ev, 'general');
+  const handleAdditionalPdfInput = (ev) => handlePdfInputWithKind(ev, 'additional');
+  const handleRentalPdfInput = (ev) => handlePdfInputWithKind(ev, 'rental');
 
   const removePdf = async (fileId) => {
     if (claimsReadOnly) return;
@@ -3015,7 +3207,7 @@ function ClaimModal({
         const cf = await api.deleteClaimPdf(authToken, claimMongoId(claimItem), fileId);
         patch((prev) => ({ ...prev, caseFiles: cf }));
       } catch (e) {
-        window.alert(e?.message ? String(e.message) : 'Could not delete file.');
+        void alertError(e?.message ? String(e.message) : 'Could not delete file.');
       } finally {
         setPdfBusy(false);
       }
@@ -3098,7 +3290,7 @@ function ClaimModal({
             )}
             <button
               type="button"
-              onClick={closeModal}
+              onClick={() => void closeModal()}
               className="flex h-10 w-10 items-center justify-center rounded-xl border border-zinc-200/90 bg-white text-zinc-600 shadow-sm transition hover:bg-zinc-50 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 focus-visible:ring-offset-2"
               aria-label="Close"
             >
@@ -3132,7 +3324,7 @@ function ClaimModal({
                   <button
                     key={item.id}
                     type="button"
-                    onClick={() => navigateTab(item.id)}
+                    onClick={() => void navigateTab(item.id)}
                     data-active-tab={tab === item.id ? 'true' : undefined}
                     className={`flex h-10 min-w-[8.5rem] max-w-[11rem] flex-none items-center justify-center gap-2 rounded-xl px-3 text-center text-xs font-semibold leading-tight transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 lg:h-auto lg:min-w-0 lg:max-w-none lg:justify-between lg:py-2.5 lg:text-left ${
                       tab === item.id
@@ -3168,7 +3360,7 @@ function ClaimModal({
             )}
 
             {tab === 'evidence' && (
-              <EvidenceWorkspace groups={evidenceGroups} onOpenSubmission={() => navigateTab('submission')} />
+              <EvidenceWorkspace groups={evidenceGroups} onOpenSubmission={() => void navigateTab('submission')} />
             )}
 
             {tab === 'overview' && (
@@ -3212,14 +3404,14 @@ function ClaimModal({
                       <div className="mt-3 flex flex-wrap gap-2">
                         <button
                           type="button"
-                          onClick={() => navigateTab('evidence')}
+                          onClick={() => void navigateTab('evidence')}
                           className="inline-flex h-9 items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 text-2xs font-semibold text-zinc-800 shadow-sm transition hover:bg-zinc-50"
                         >
                           Review evidence
                         </button>
                         <button
                           type="button"
-                          onClick={() => navigateTab('submission')}
+                          onClick={() => void navigateTab('submission')}
                           className="inline-flex h-9 items-center gap-2 rounded-lg bg-indigo-600 px-3 text-2xs font-semibold text-white shadow-sm transition hover:bg-indigo-500"
                         >
                           Open full submission
@@ -3227,7 +3419,7 @@ function ClaimModal({
                         {!claimsReadOnly ? (
                           <button
                             type="button"
-                            onClick={() => navigateTab('quotes')}
+                            onClick={() => void navigateTab('quotes')}
                             className="inline-flex h-9 items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-2xs font-semibold text-indigo-900 transition hover:bg-indigo-100"
                           >
                             Workshop / quote
@@ -3270,7 +3462,7 @@ function ClaimModal({
                   </div>
                 </section>
 
-                <DocumentChecklist documents={caseSignals.documents} onViewEvidence={() => navigateTab('evidence')} />
+                <DocumentChecklist documents={caseSignals.documents} onViewEvidence={() => void navigateTab('evidence')} />
 
                 <div className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner">
                   <h3 className="text-[13px] font-semibold text-zinc-900">Reference codes</h3>
@@ -3333,11 +3525,11 @@ function ClaimModal({
                   {!claimsReadOnly && (
                     <div className="mt-4 rounded-xl border border-indigo-200/90 bg-indigo-50/70 p-3.5">
                       <p className="text-xs leading-relaxed text-indigo-950">
-                        Changes save to Horizon API (insurance quote, purchase lines, notes). Upload PDFs on the insurance quote tab.
+                        Changes save to Horizon API (insurance quote, purchase lines, notes). Upload claim form PDFs on the Claim form PDF tab.
                       </p>
                       <button
                         type="button"
-                        onClick={() => navigateTab('quotes')}
+                        onClick={() => void navigateTab('quotes')}
                         className="mt-2.5 inline-flex h-9 items-center gap-2 rounded-lg bg-indigo-600 px-3 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
                       >
                         <FileText className="h-3.5 w-3.5" strokeWidth={2} />
@@ -3441,7 +3633,7 @@ function ClaimModal({
 
             {tab === 'documents' && (
               <div className="space-y-4">
-                <DocumentChecklist documents={caseSignals.documents} onViewEvidence={() => navigateTab('evidence')} />
+                <DocumentChecklist documents={caseSignals.documents} onViewEvidence={() => void navigateTab('evidence')} />
                 <div className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner">
                   <h3 className="text-[13px] font-semibold text-zinc-900">Where to inspect files</h3>
                   <p className="mt-2 text-sm leading-relaxed text-zinc-600">
@@ -3451,7 +3643,7 @@ function ClaimModal({
                   <div className="mt-3 flex flex-wrap gap-2">
                     <button
                       type="button"
-                      onClick={() => navigateTab('evidence')}
+                      onClick={() => void navigateTab('evidence')}
                       className="inline-flex h-9 items-center rounded-lg bg-indigo-600 px-3 text-2xs font-semibold text-white shadow-sm transition hover:bg-indigo-500"
                     >
                       Open evidence
@@ -3459,7 +3651,7 @@ function ClaimModal({
                     {!claimsReadOnly ? (
                       <button
                         type="button"
-                        onClick={() => navigateTab('parts')}
+                        onClick={() => void navigateTab('parts')}
                         className="inline-flex h-9 items-center rounded-lg border border-zinc-200 bg-white px-3 text-2xs font-semibold text-zinc-800 shadow-sm transition hover:bg-zinc-50"
                       >
                         Open parts tab
@@ -3731,78 +3923,6 @@ function ClaimModal({
                 </section>
 
                 <section className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner sm:p-5">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <h3 className="text-[13px] font-semibold text-zinc-900">Case PDFs</h3>
-                      <p className="mt-1 text-2xs leading-relaxed text-zinc-600 sm:text-xs">
-                        PDFs are uploaded to your Horizon API (<span className="font-semibold">{api.apiBase()}</span>) under
-                        <span className="font-mono"> /uploads</span>. Administrators can attach files up to the server limit
-                        (defaults to 25&nbsp;MB per file).
-                      </p>
-                    </div>
-                    {!claimsReadOnly && (
-                      <>
-                        <input
-                          ref={fileInputRef}
-                          type="file"
-                          accept="application/pdf,.pdf"
-                          multiple
-                          className="sr-only"
-                          onChange={handlePdfInput}
-                        />
-                        <button
-                          type="button"
-                          disabled={pdfBusy}
-                          onClick={() => !pdfBusy && fileInputRef.current?.click()}
-                          className="inline-flex h-10 shrink-0 items-center gap-2 rounded-xl border border-indigo-200/90 bg-indigo-50 px-3 text-xs font-semibold text-indigo-900 transition hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 disabled:cursor-wait disabled:opacity-70"
-                        >
-                          <Upload className="h-4 w-4" strokeWidth={2} />
-                          {pdfBusy ? (authToken ? 'Uploading…' : 'Reading PDF…') : 'Upload PDF'}
-                        </button>
-                      </>
-                    )}
-                  </div>
-                  {caseFiles.length === 0 ? (
-                    <p className="mt-4 rounded-xl border border-dashed border-zinc-200 bg-zinc-50 px-4 py-8 text-center text-sm text-zinc-500">
-                      No PDFs uploaded yet.
-                    </p>
-                  ) : (
-                    <ul className="mt-4 divide-y divide-zinc-100 rounded-xl border border-zinc-100">
-                      {caseFiles.map((file) => (
-                        <li key={file.id} className="flex flex-wrap items-center gap-3 px-3 py-3 first:pt-3">
-                          <FileText className="h-4 w-4 shrink-0 text-indigo-600" strokeWidth={2} />
-                          <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm font-medium text-zinc-900">{file.name}</p>
-                            <p className="text-2xs text-zinc-500">
-                              {formatFileSize(file.size)} · {file.uploadedAt}
-                            </p>
-                          </div>
-                          <a
-                            href={resolveClaimFileHref(file.dataUrl || file.url)}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="rounded-lg border border-zinc-200 px-2 py-1 text-2xs font-semibold text-zinc-700 hover:bg-zinc-50"
-                          >
-                            Open
-                          </a>
-                          {!claimsReadOnly && (
-                            <button
-                              type="button"
-                              disabled={pdfBusy}
-                              onClick={() => removePdf(file.id)}
-                              className="rounded-lg border border-rose-200/90 p-1.5 text-rose-700 hover:bg-rose-50"
-                              aria-label={`Remove ${file.name}`}
-                            >
-                              <Trash2 className="h-4 w-4" strokeWidth={2} />
-                            </button>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </section>
-
-                <section className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner sm:p-5">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <h3 className="text-[13px] font-semibold text-zinc-900">Repair quotes</h3>
@@ -3867,6 +3987,48 @@ function ClaimModal({
                                   className="mt-1 w-full resize-y rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm text-zinc-900 shadow-inner outline-none placeholder:text-zinc-400 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/15"
                                 />
                               </div>
+                              <div>
+                                <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">
+                                  Quote PDF
+                                </p>
+                                {q.fileId ? (
+                                  <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-zinc-200 bg-white px-2.5 py-2">
+                                    <FileText className="h-4 w-4 shrink-0 text-indigo-600" strokeWidth={2} />
+                                    <span className="min-w-0 flex-1 truncate text-sm text-zinc-800">
+                                      {q.fileName || 'Quote.pdf'}
+                                    </span>
+                                    <CasePdfFileActions
+                                      file={{ id: q.fileId, name: q.fileName, url: q.fileUrl }}
+                                    />
+                                    <button
+                                      type="button"
+                                      disabled={quotePdfBusyId === q.id}
+                                      onClick={() => handleRemoveRepairQuotePdf(q.id)}
+                                      className="rounded-lg border border-rose-200/90 p-1.5 text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                                      aria-label="Remove quote PDF"
+                                    >
+                                      <Trash2 className="h-4 w-4" strokeWidth={2} />
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <label
+                                    className={`mt-2 flex cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-zinc-200 bg-zinc-50/80 px-3 py-4 text-center transition hover:border-indigo-300 hover:bg-indigo-50/40 ${quotePdfBusyId === q.id ? 'pointer-events-none opacity-60' : ''}`}
+                                  >
+                                    <Upload className="h-5 w-5 text-indigo-600" strokeWidth={2} />
+                                    <span className="mt-1.5 text-xs font-semibold text-indigo-900">
+                                      {quotePdfBusyId === q.id ? 'Uploading…' : 'Upload quote PDF'}
+                                    </span>
+                                    <span className="mt-0.5 text-2xs text-zinc-500">PDF only, up to 25&nbsp;MB</span>
+                                    <input
+                                      type="file"
+                                      accept="application/pdf,.pdf"
+                                      className="sr-only"
+                                      disabled={quotePdfBusyId === q.id}
+                                      onChange={(e) => handleRepairQuotePdfUpload(q.id, e)}
+                                    />
+                                  </label>
+                                )}
+                              </div>
                             </div>
                           ) : (
                             <div className="space-y-1">
@@ -3876,6 +4038,16 @@ function ClaimModal({
                               <p className="text-sm font-semibold text-zinc-900">{q.supplier}</p>
                               {(q.notes ?? '').trim() ? (
                                 <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-600">{q.notes}</p>
+                              ) : null}
+                              {q.fileId ? (
+                                <div className="mt-2 flex flex-wrap items-center gap-2">
+                                  <span className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">
+                                    Quote PDF
+                                  </span>
+                                  <CasePdfFileActions
+                                    file={{ id: q.fileId, name: q.fileName, url: q.fileUrl }}
+                                  />
+                                </div>
                               ) : null}
                             </div>
                           )}
@@ -4169,6 +4341,276 @@ function ClaimModal({
                 </section>
               </div>
             )}
+
+            {tab === 'claimFormPdf' && (
+              <div className="space-y-6">
+                {isAdminBuyerPdf ? (
+                  <section className="rounded-xl border border-violet-200/70 bg-white p-4 shadow-inner sm:p-5">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="flex min-w-0 flex-1 items-start gap-3">
+                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-violet-200 bg-violet-50 text-violet-700 shadow-inner">
+                          <FileText className="h-4 w-4" strokeWidth={2} />
+                        </span>
+                        <div className="min-w-0">
+                          <h3 className="text-[13px] font-semibold text-zinc-900">Claim form PDF</h3>
+                          <p className="mt-0.5 text-2xs leading-relaxed text-zinc-600 sm:text-xs">
+                            Original scanned claim form from admin OCR intake, plus any additional supporting PDFs.
+                            Stored at <span className="font-semibold">{api.apiBase()}</span>
+                            <span className="font-mono"> /uploads</span>.
+                          </p>
+                        </div>
+                      </div>
+                      {!claimsReadOnly && (
+                        <>
+                          <input
+                            ref={additionalFileInputRef}
+                            type="file"
+                            accept="application/pdf,.pdf"
+                            multiple
+                            className="sr-only"
+                            onChange={handleAdditionalPdfInput}
+                          />
+                          <button
+                            type="button"
+                            disabled={pdfBusy}
+                            onClick={() => !pdfBusy && additionalFileInputRef.current?.click()}
+                            className="inline-flex h-10 shrink-0 items-center gap-2 rounded-xl border border-indigo-200/90 bg-indigo-50 px-3 text-xs font-semibold text-indigo-900 transition hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 disabled:cursor-wait disabled:opacity-70"
+                          >
+                            <Upload className="h-4 w-4" strokeWidth={2} />
+                            {pdfBusy ? (authToken ? 'Uploading…' : 'Reading PDF…') : 'Upload document'}
+                          </button>
+                        </>
+                      )}
+                    </div>
+
+                    <div className="mt-5 space-y-5">
+                      <div>
+                        <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">
+                          Claim form PDF (intake)
+                        </p>
+                        {intakeFiles.length === 0 ? (
+                          <p className="mt-2 rounded-xl border border-dashed border-zinc-200 bg-zinc-50 px-4 py-5 text-center text-sm text-zinc-500">
+                            No claim form PDF on record.
+                          </p>
+                        ) : (
+                          <ul className="mt-2 divide-y divide-zinc-100 rounded-xl border border-zinc-100">
+                            {intakeFiles.map((file) => (
+                              <li key={file.id} className="flex flex-wrap items-center gap-3 px-3 py-3">
+                                <FileText className="h-4 w-4 shrink-0 text-violet-600" strokeWidth={2} />
+                                <div className="min-w-0 flex-1">
+                                  <p className="truncate text-sm font-medium text-zinc-900">{file.name}</p>
+                                  <p className="text-2xs text-zinc-500">
+                                    {formatFileSize(file.size)} · {file.uploadedAt}
+                                    <span className="ml-1.5 rounded border border-violet-200 bg-violet-50 px-1 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-800">
+                                      Intake
+                                    </span>
+                                  </p>
+                                </div>
+                                <CasePdfFileActions file={file} />
+                                {!claimsReadOnly && (
+                                  <button
+                                    type="button"
+                                    disabled={pdfBusy}
+                                    onClick={() => {
+                                      void (async () => {
+                                        if (
+                                          await confirmDelete(
+                                            'Remove the original claim form PDF? This cannot be undone.',
+                                            'Remove PDF?',
+                                          )
+                                        ) {
+                                          removePdf(file.id);
+                                        }
+                                      })();
+                                    }}
+                                    className="rounded-lg border border-rose-200/90 p-1.5 text-rose-700 hover:bg-rose-50"
+                                    aria-label={`Remove claim form PDF ${file.name}`}
+                                  >
+                                    <Trash2 className="h-4 w-4" strokeWidth={2} />
+                                  </button>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+
+                      <div className="border-t border-zinc-100 pt-5">
+                        <p className="text-2xs font-semibold uppercase tracking-wider text-zinc-500">
+                          Additional documents
+                        </p>
+                        {additionalFiles.length === 0 ? (
+                          <p className="mt-2 rounded-xl border border-dashed border-zinc-200 bg-zinc-50 px-4 py-5 text-center text-sm text-zinc-500">
+                            No additional documents yet. Use Upload document above.
+                          </p>
+                        ) : (
+                          <ul className="mt-2 divide-y divide-zinc-100 rounded-xl border border-zinc-100">
+                            {additionalFiles.map((file) => (
+                              <li key={file.id} className="flex flex-wrap items-center gap-3 px-3 py-3">
+                                <FileText className="h-4 w-4 shrink-0 text-indigo-600" strokeWidth={2} />
+                                <div className="min-w-0 flex-1">
+                                  <p className="truncate text-sm font-medium text-zinc-900">{file.name}</p>
+                                  <p className="text-2xs text-zinc-500">
+                                    {formatFileSize(file.size)} · {file.uploadedAt}
+                                  </p>
+                                </div>
+                                <CasePdfFileActions file={file} />
+                                {!claimsReadOnly && (
+                                  <button
+                                    type="button"
+                                    disabled={pdfBusy}
+                                    onClick={() => removePdf(file.id)}
+                                    className="rounded-lg border border-rose-200/90 p-1.5 text-rose-700 hover:bg-rose-50"
+                                    aria-label={`Remove ${file.name}`}
+                                  >
+                                    <Trash2 className="h-4 w-4" strokeWidth={2} />
+                                  </button>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    </div>
+                  </section>
+                ) : (
+                  <section className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-inner sm:p-5">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <h3 className="text-[13px] font-semibold text-zinc-900">Case PDFs</h3>
+                        <p className="mt-1 text-2xs leading-relaxed text-zinc-600 sm:text-xs">
+                          PDFs are uploaded to your Horizon API (<span className="font-semibold">{api.apiBase()}</span>) under
+                          <span className="font-mono"> /uploads</span>. Administrators can attach files up to the server limit
+                          (defaults to 25&nbsp;MB per file).
+                        </p>
+                      </div>
+                      {!claimsReadOnly && (
+                        <>
+                          <input
+                            ref={fileInputRef}
+                            type="file"
+                            accept="application/pdf,.pdf"
+                            multiple
+                            className="sr-only"
+                            onChange={handlePdfInput}
+                          />
+                          <button
+                            type="button"
+                            disabled={pdfBusy}
+                            onClick={() => !pdfBusy && fileInputRef.current?.click()}
+                            className="inline-flex h-10 shrink-0 items-center gap-2 rounded-xl border border-indigo-200/90 bg-indigo-50 px-3 text-xs font-semibold text-indigo-900 transition hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 disabled:cursor-wait disabled:opacity-70"
+                          >
+                            <Upload className="h-4 w-4" strokeWidth={2} />
+                            {pdfBusy ? (authToken ? 'Uploading…' : 'Reading PDF…') : 'Upload PDF'}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                    {generalFiles.length === 0 ? (
+                      <p className="mt-4 rounded-xl border border-dashed border-zinc-200 bg-zinc-50 px-4 py-8 text-center text-sm text-zinc-500">
+                        No PDFs uploaded yet.
+                      </p>
+                    ) : (
+                      <ul className="mt-4 divide-y divide-zinc-100 rounded-xl border border-zinc-100">
+                        {generalFiles.map((file) => (
+                          <li key={file.id} className="flex flex-wrap items-center gap-3 px-3 py-3 first:pt-3">
+                            <FileText className="h-4 w-4 shrink-0 text-indigo-600" strokeWidth={2} />
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate text-sm font-medium text-zinc-900">{file.name}</p>
+                              <p className="text-2xs text-zinc-500">
+                                {formatFileSize(file.size)} · {file.uploadedAt}
+                              </p>
+                            </div>
+                            <CasePdfFileActions file={file} />
+                            {!claimsReadOnly && (
+                              <button
+                                type="button"
+                                disabled={pdfBusy}
+                                onClick={() => removePdf(file.id)}
+                                className="rounded-lg border border-rose-200/90 p-1.5 text-rose-700 hover:bg-rose-50"
+                                aria-label={`Remove ${file.name}`}
+                              >
+                                <Trash2 className="h-4 w-4" strokeWidth={2} />
+                              </button>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </section>
+                )}
+
+                {isRentalStatus && (
+                  <section className="rounded-xl border border-indigo-200/70 bg-white p-4 shadow-inner sm:p-5">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="flex items-start gap-3">
+                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-indigo-200 bg-indigo-50 text-indigo-700 shadow-inner">
+                          <Car className="h-4 w-4" strokeWidth={2} />
+                        </span>
+                        <div className="min-w-0">
+                          <h3 className="text-[13px] font-semibold text-zinc-900">Rental documents</h3>
+                          <p className="mt-0.5 text-2xs leading-relaxed text-zinc-600 sm:text-xs">
+                            Upload rental-related PDFs for this claim. Additional rental workflow features will be added in a future update.
+                          </p>
+                        </div>
+                      </div>
+                      {!claimsReadOnly && (
+                        <>
+                          <input
+                            ref={rentalFileInputRef}
+                            type="file"
+                            accept="application/pdf,.pdf"
+                            multiple
+                            className="sr-only"
+                            onChange={handleRentalPdfInput}
+                          />
+                          <button
+                            type="button"
+                            disabled={pdfBusy}
+                            onClick={() => !pdfBusy && rentalFileInputRef.current?.click()}
+                            className="inline-flex h-10 shrink-0 items-center gap-2 rounded-xl border border-indigo-200/90 bg-indigo-50 px-3 text-xs font-semibold text-indigo-900 transition hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80 disabled:cursor-wait disabled:opacity-70"
+                          >
+                            <Upload className="h-4 w-4" strokeWidth={2} />
+                            {pdfBusy ? (authToken ? 'Uploading…' : 'Reading PDF…') : 'Upload rental PDF'}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                    {rentalFiles.length === 0 ? (
+                      <p className="mt-4 rounded-xl border border-dashed border-indigo-100 bg-indigo-50/50 px-4 py-8 text-center text-sm text-indigo-500">
+                        No rental documents uploaded yet.
+                      </p>
+                    ) : (
+                      <ul className="mt-4 divide-y divide-zinc-100 rounded-xl border border-zinc-100">
+                        {rentalFiles.map((file) => (
+                          <li key={file.id} className="flex flex-wrap items-center gap-3 px-3 py-3 first:pt-3">
+                            <Car className="h-4 w-4 shrink-0 text-indigo-600" strokeWidth={2} />
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate text-sm font-medium text-zinc-900">{file.name}</p>
+                              <p className="text-2xs text-zinc-500">
+                                {formatFileSize(file.size)} · {file.uploadedAt}
+                              </p>
+                            </div>
+                            <CasePdfFileActions file={file} />
+                            {!claimsReadOnly && (
+                              <button
+                                type="button"
+                                disabled={pdfBusy}
+                                onClick={() => removePdf(file.id)}
+                                className="rounded-lg border border-rose-200/90 p-1.5 text-rose-700 hover:bg-rose-50"
+                                aria-label={`Remove ${file.name}`}
+                              >
+                                <Trash2 className="h-4 w-4" strokeWidth={2} />
+                              </button>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </section>
+                )}
+              </div>
+            )}
           </div>
           </main>
         </div>
@@ -4257,6 +4699,20 @@ function ClaimModal({
                     </button>
                     <button
                       type="button"
+                      onClick={onRental}
+                      className="h-10 min-w-[7rem] flex-none rounded-xl border border-indigo-200/90 bg-indigo-50 px-3 text-xs font-semibold text-indigo-900 transition hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80"
+                    >
+                      Rental
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onCompleted}
+                      className="h-10 min-w-[7.5rem] flex-none rounded-xl border border-teal-200/90 bg-teal-50 px-3 text-xs font-semibold text-teal-900 transition hover:bg-teal-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/80"
+                    >
+                      Completed
+                    </button>
+                    <button
+                      type="button"
                       onClick={onApprove}
                       className="h-10 min-w-[8rem] flex-none rounded-xl bg-emerald-600 px-3 text-xs font-semibold text-white shadow-md shadow-emerald-900/10 transition hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/80"
                     >
@@ -4288,6 +4744,24 @@ function ClaimModal({
                         className="h-10 min-w-[7rem] flex-none rounded-xl border border-sky-200/90 bg-sky-50 px-3 text-xs font-semibold text-sky-900 transition hover:bg-sky-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/80"
                       >
                         Recovery
+                      </button>
+                    )}
+                    {claimStatus !== 'Rental' && (
+                      <button
+                        type="button"
+                        onClick={onRental}
+                        className="h-10 min-w-[7rem] flex-none rounded-xl border border-indigo-200/90 bg-indigo-50 px-3 text-xs font-semibold text-indigo-900 transition hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/80"
+                      >
+                        Rental
+                      </button>
+                    )}
+                    {claimStatus !== 'Completed' && (
+                      <button
+                        type="button"
+                        onClick={onCompleted}
+                        className="h-10 min-w-[7.5rem] flex-none rounded-xl border border-teal-200/90 bg-teal-50 px-3 text-xs font-semibold text-teal-900 transition hover:bg-teal-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/80"
+                      >
+                        Completed
                       </button>
                     )}
                   </>
